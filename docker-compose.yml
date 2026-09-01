@@ -1,0 +1,47 @@
+version: "3.8"
+
+services:
+  riskdesk:
+    build: ./riskdesk
+    container_name: riskdesk
+    restart: unless-stopped
+    ports:
+      - "${RISKDESK_PORT:-8080}:8080"
+    volumes:
+      - riskdesk-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env_file: .env
+    environment:
+      RISKDESK_DB_URL: sqlite:////data/riskdesk.db
+      RISKDESK_HOST: "0.0.0.0"
+      RISKDESK_PORT: "8080"
+      RISKDESK_SCHEDULER: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/meta"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+    networks:
+      - riskbench
+
+  riskdesk-init:
+    build: ./riskdesk
+    container_name: riskdesk-init
+    volumes:
+      - riskdesk-data:/data
+    env_file: .env
+    environment:
+      RISKDESK_DB_URL: sqlite:////data/riskdesk.db
+    command: ["init"]
+    networks:
+      - riskbench
+    profiles:
+      - setup
+
+volumes:
+  riskdesk-data:
+
+networks:
+  riskbench:
+    name: riskbench
+    driver: bridge

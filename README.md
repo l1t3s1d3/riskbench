@@ -205,6 +205,68 @@ The pipeline has three gates that work together to enforce "no unreviewed critic
 
 ---
 
+## Deployment
+
+Two deployment modes. Both are containerized. Both can run on a single VM.
+
+### Local / VM (no SSO)
+
+Users authenticate with local accounts managed from the Settings tab in RiskDesk. Good for isolated environments, lab setups, or small teams.
+
+```bash
+# Option A: Docker Compose (recommended)
+docker compose run --rm riskdesk-init init   # first time only
+docker compose up -d
+
+# Option B: Bare-metal via deploy.sh
+sudo ./deploy.sh    # installs everything, generates secrets, creates systemd services
+```
+
+The deploy script handles RiskDesk as a systemd service and the pipeline as Docker Compose, configures UFW firewall rules, sets up nightly cron jobs (EPSS/KEV updates, DB backups, session cleanup), and wires the pipeline's API token to RiskDesk automatically.
+
+### Network / SSO (domain deployment)
+
+Users authenticate via your identity provider (Azure AD, Okta, Keycloak, etc.) through OAuth2 Proxy. Nginx terminates TLS. RiskDesk sees `X-Forwarded-User` headers and auto-provisions user accounts on first login. Local accounts still work alongside SSO for service accounts and CLI access.
+
+```bash
+cd deploy/network-sso
+./setup-sso.sh                                      # generates cookie secret, self-signed cert
+# edit .env: set OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_ISSUER_URL
+docker compose -f docker-compose.sso.yml up -d
+```
+
+Pipeline API endpoints (`/api/pipeline/*`) bypass SSO and use bearer token authentication, so CI scanners authenticate directly without going through the identity provider.
+
+### Container management
+
+The Settings tab in RiskDesk shows all pipeline containers with start/stop/restart/logs controls. Requires mounting the Docker socket (`/var/run/docker.sock`) into the RiskDesk container, which both docker-compose files do by default.
+
+### Project structure
+
+```
+riskbench/
+├── riskdesk/                    Vulnerability management application
+│   ├── Dockerfile               Container image for RiskDesk
+│   ├── app/                     FastAPI backend + SPA frontend
+│   └── requirements.txt
+├── devsecops-pipeline/          CI/CD + scanning stack
+│   ├── docker-compose.yml       12-service pipeline
+│   ├── trivy-agent/             Continuous container/SCA scanner
+│   └── openscap-agent/          CIS/STIG compliance scanner
+├── deploy/
+│   └── network-sso/             SSO deployment config
+│       ├── docker-compose.sso.yml
+│       ├── nginx.conf           TLS termination + auth_request
+│       ├── setup-sso.sh         First-time setup
+│       └── .env.example
+├── docker-compose.yml           Local VM deployment (RiskDesk only)
+├── deploy.sh                    Full bare-metal installer
+├── Makefile                     Dev/ops convenience targets
+└── VERSION
+```
+
+---
+
 ## Environment and context
 
 Built for PLI (Practising Law Institute), a legal education organization serving attorneys and judges. The security team is ~3 people. The environment includes Azure and AWS cloud, CrowdStrike Falcon Complete, Wiz, GitHub Advanced Security, Microsoft Purview, and SolarWinds.
