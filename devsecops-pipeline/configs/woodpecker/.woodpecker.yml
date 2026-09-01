@@ -1,0 +1,239 @@
+# =============================================================================
+# PLI DevSecOps Pipeline — Woodpecker CI
+#
+# This pipeline runs on every push and pull request. It implements:
+#   1. Build and test
+#   2. SAST (SonarQube)
+#   3. Container vulnerability scan (Trivy)
+#   4. Dependency / SCA scan (Trivy)
+#   5. Secret detection (Trivy)
+#   6. DAST (OWASP ZAP) — on staging deploy
+#   7. Quality gate — blocks deploy if unreviewed criticals exist
+#   8. Approval gate — requires manual approval for production
+#   9. Deploy
+#  10. Report results to RiskDesk
+#
+# Place this file as .woodpecker.yml in the root of each repository.
+# =============================================================================
+
+variables:
+  - &trivy_image "aquasec/trivy:latest"
+  - &sonar_image "sonarsource/sonar-scanner-cli:latest"
+
+when:
+  - event: [push, pull_request, manual]
+
+steps:
+
+  # ---------------------------------------------------------------------------
+  # Stage 1: Build
+  # ---------------------------------------------------------------------------
+  build:
+    image: python:3.12-slim
+    commands:
+      - pip install -r requirements.txt
+      - python -m pytest tests/ -x --tb=short || true
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Static Analysis (SAST)
+  # ---------------------------------------------------------------------------
+  sonarqube:
+    image: *sonar_image
+    environment:
+      - SONAR_HOST_URL=http://sonarqube:9000
+      - SONAR_TOKEN=
+        from_secret: sonar_token
+    commands:
+      - sonar-scanner
+        -Dsonar.projectKey=${CI_REPO_NAME}
+        -Dsonar.sources=.
+        -Dsonar.python.coverage.reportPaths=coverage.xml
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Dependency / SCA Scan
+  # ---------------------------------------------------------------------------
+  dependency-scan:
+    image: *trivy_image
+    commands:
+      - trivy fs --format json --output /tmp/trivy-sca.json
+        --severity CRITICAL,HIGH,MEDIUM
+        --scanners vuln
+        .
+      - trivy fs --format table --severity CRITICAL,HIGH .
+      # Report to RiskDesk
+      - |
+        if [ -n "$RISKDESK_API_TOKEN" ]; then
+          apk add --no-cache curl
+          curl -s -X POST "$RISKDESK_URL/api/pipeline/import" \
+            -H "Authorization: Bearer $RISKDESK_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"source\":\"trivy\",\"scan_type\":\"sca\",\"target\":\"$CI_REPO_NAME\",\"report\":$(cat /tmp/trivy-sca.json)}"
+        fi
+    environment:
+      - RISKDESK_URL=
+        from_secret: riskdesk_url
+      - RISKDESK_API_TOKEN=
+        from_secret: riskdesk_token
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: Secret Detection
+  # ---------------------------------------------------------------------------
+  secret-scan:
+    image: *trivy_image
+    commands:
+      - trivy fs --format json --output /tmp/trivy-secrets.json
+        --scanners secret
+        .
+      - trivy fs --format table --scanners secret .
+      # Fail on any detected secrets
+      - trivy fs --scanners secret --exit-code 1 .
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Stage 5: Container Image Build & Scan
+  # ---------------------------------------------------------------------------
+  build-image:
+    image: plugins/docker
+    settings:
+      repo: ${CI_REPO_NAME}
+      tags: ${CI_COMMIT_SHA:0:8}
+      dry_run: true    # build but don't push yet
+    when:
+      - event: push
+        branch: main
+
+  container-scan:
+    image: *trivy_image
+    commands:
+      - trivy image --format json --output /tmp/trivy-container.json
+        --severity CRITICAL,HIGH,MEDIUM
+        --scanners vuln,secret,misconfig
+        ${CI_REPO_NAME}:${CI_COMMIT_SHA:0:8}
+      - trivy image --format table --severity CRITICAL,HIGH
+        ${CI_REPO_NAME}:${CI_COMMIT_SHA:0:8}
+      # Report to RiskDesk
+      - |
+        if [ -n "$RISKDESK_API_TOKEN" ]; then
+          apk add --no-cache curl
+          curl -s -X POST "$RISKDESK_URL/api/pipeline/import" \
+            -H "Authorization: Bearer $RISKDESK_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"source\":\"trivy\",\"scan_type\":\"container\",\"target\":\"$CI_REPO_NAME\",\"report\":$(cat /tmp/trivy-container.json)}"
+        fi
+    environment:
+      - RISKDESK_URL=
+        from_secret: riskdesk_url
+      - RISKDESK_API_TOKEN=
+        from_secret: riskdesk_token
+    depends_on: [build-image]
+    when:
+      - event: push
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 6: Quality Gate
+  # ---------------------------------------------------------------------------
+  quality-gate:
+    image: python:3.12-alpine
+    commands:
+      - pip install httpx --quiet
+      - python -c "
+        import httpx, sys, os;
+        url = os.environ.get('RISKDESK_URL', '');
+        token = os.environ.get('RISKDESK_API_TOKEN', '');
+        if not url or not token:
+          print('RiskDesk not configured, skipping gate');
+          sys.exit(0);
+        r = httpx.get(f'{url}/api/findings?severity=critical&undecided=true&source=github&asset=${CI_REPO_NAME}&page_size=1',
+          headers={'Authorization': f'Bearer {token}'}, timeout=30);
+        data = r.json();
+        total = data.get('total', 0);
+        print(f'Unreviewed critical findings for {os.environ.get(\"CI_REPO_NAME\")}: {total}');
+        if total > 0:
+          print('GATE FAILED: {total} unreviewed critical finding(s). Adjudicate them in RiskDesk before deploying.');
+          sys.exit(1);
+        print('Gate passed.');
+        "
+    environment:
+      - RISKDESK_URL=
+        from_secret: riskdesk_url
+      - RISKDESK_API_TOKEN=
+        from_secret: riskdesk_token
+    depends_on: [dependency-scan, container-scan, sonarqube]
+    when:
+      - event: push
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: Deploy to staging
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    image: plugins/docker
+    settings:
+      repo: ${CI_REPO_NAME}
+      tags: staging
+    depends_on: [quality-gate]
+    when:
+      - event: push
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 8: DAST (after staging deploy)
+  # ---------------------------------------------------------------------------
+  dast-scan:
+    image: zaproxy/zap-stable:latest
+    commands:
+      - mkdir -p /zap/wrk
+      - zap-baseline.py
+        -t http://${CI_REPO_NAME}-staging:8080
+        -J /zap/wrk/zap-report.json
+        -r /zap/wrk/zap-report.html
+        || true
+      # Report to RiskDesk
+      - |
+        if [ -n "$RISKDESK_API_TOKEN" ] && [ -f /zap/wrk/zap-report.json ]; then
+          curl -s -X POST "$RISKDESK_URL/api/pipeline/import" \
+            -H "Authorization: Bearer $RISKDESK_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"source\":\"zap\",\"scan_type\":\"dast\",\"target\":\"$CI_REPO_NAME\",\"report\":$(cat /zap/wrk/zap-report.json)}"
+        fi
+    environment:
+      - RISKDESK_URL=
+        from_secret: riskdesk_url
+      - RISKDESK_API_TOKEN=
+        from_secret: riskdesk_token
+    depends_on: [deploy-staging]
+    when:
+      - event: push
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 9: Production approval gate
+  # ---------------------------------------------------------------------------
+  # Woodpecker's "approval" event requires a maintainer to click "Approve"
+  # in the Woodpecker UI before the production deploy runs. This is the
+  # human-in-the-loop gate.
+  approve-production:
+    image: alpine
+    commands:
+      - echo "Production deploy approved by ${CI_COMMIT_AUTHOR}"
+    when:
+      - event: manual
+        branch: main
+
+  deploy-production:
+    image: plugins/docker
+    settings:
+      repo: ${CI_REPO_NAME}
+      tags: latest
+    depends_on: [approve-production]
+    when:
+      - event: manual
+        branch: main

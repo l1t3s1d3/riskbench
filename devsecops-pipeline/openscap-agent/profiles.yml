@@ -1,0 +1,36 @@
+# OpenSCAP Agent — Scan Profiles
+#
+# Each profile maps to an XCCDF benchmark and a profile within it.
+# The agent evaluates each enabled profile on every scan cycle and
+# reports results to RiskDesk's compliance import API.
+#
+# Content sources:
+#   SCAP Security Guide (SSG): bundled with the container, covers most Linux
+#     distros. Paths: /usr/share/xml/scap/ssg/content/ssg-<distro>-ds.xml
+#   CIS-CAT content: download from CIS and mount into /content/
+#   DISA STIG content: download from cyber.mil and mount into /content/
+#
+# To add a new profile, append an entry below and rebuild or restart the agent.
+
+profiles:
+  - name: "CIS Ubuntu 22.04 Level 1 Server"
+    content: "/usr/share/xml/scap/ssg/content/ssg-ubuntu2204-ds.xml"
+    profile: "xccdf_org.ssgproject.content_profile_cis_level1_server"
+    enabled: true
+
+  - name: "CIS Ubuntu 22.04 Level 2 Server"
+    content: "/usr/share/xml/scap/ssg/content/ssg-ubuntu2204-ds.xml"
+    profile: "xccdf_org.ssgproject.content_profile_cis_level2_server"
+    enabled: false
+
+  # Example: mount CIS-CAT content and reference it
+  # - name: "CIS Cisco IOS XE 17.x Level 1"
+  #   content: "/content/CIS_Cisco_IOS_XE_17.x_Benchmark-xccdf.xml"
+  #   profile: "xccdf_org.cisecurity.benchmarks_profile_Level_1"
+  #   enabled: true
+
+  # Example: DISA STIG
+  # - name: "DISA STIG Windows Server 2022"
+  #   content: "/content/U_MS_Windows_Server_2022_V1R4_STIG_SCAP_1-2_Benchmark.xml"
+  #   profile: "xccdf_mil.disa.stig_profile_MAC-1_Classified"
+  #   enabled: true

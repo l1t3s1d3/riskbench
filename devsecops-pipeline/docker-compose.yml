@@ -1,0 +1,262 @@
+# =============================================================================
+# PLI DevSecOps Pipeline — Docker Compose
+#
+# Services:
+#   gitea           Self-hosted Git (GitHub alternative, lightweight)
+#   woodpecker      CI/CD engine (Drone-compatible, OSS, container-native)
+#   sonarqube       Static analysis / SAST (Community Edition)
+#   defectdojo      Vulnerability management aggregator
+#   zap             OWASP ZAP for DAST (daemon mode)
+#   trivy-agent     Container + filesystem vulnerability scanner (agent)
+#   openscap-agent  CIS/STIG compliance scanner (agent)
+#   postgres        Shared database for SonarQube and DefectDojo
+#   redis           Cache for DefectDojo
+#
+# Portability: everything runs in containers, all state lives in named
+# volumes, `docker compose down && docker compose up` on a new host works.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Source control
+  # ---------------------------------------------------------------------------
+  gitea:
+    image: gitea/gitea:1.22
+    container_name: pli-gitea
+    restart: unless-stopped
+    environment:
+      - USER_UID=1000
+      - USER_GID=1000
+      - GITEA__server__ROOT_URL=http://${HOST_IP:-localhost}:3000/
+      - GITEA__server__DOMAIN=${HOST_IP:-localhost}
+      - GITEA__database__DB_TYPE=sqlite3
+      - GITEA__webhook__ALLOWED_HOST_LIST=*
+    volumes:
+      - gitea-data:/data
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    networks:
+      - pipeline
+
+  # ---------------------------------------------------------------------------
+  # CI/CD engine
+  # ---------------------------------------------------------------------------
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v2
+    container_name: pli-woodpecker
+    restart: unless-stopped
+    environment:
+      - WOODPECKER_HOST=http://${HOST_IP:-localhost}:8000
+      - WOODPECKER_OPEN=true
+      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN:-lucas}
+      - WOODPECKER_GITEA=true
+      - WOODPECKER_GITEA_URL=http://gitea:3000
+      - WOODPECKER_GITEA_CLIENT=${GITEA_OAUTH_CLIENT_ID}
+      - WOODPECKER_GITEA_SECRET=${GITEA_OAUTH_CLIENT_SECRET}
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET:-supersecretagentkey}
+      # Webhook callback URL as seen by Gitea (inter-container)
+      - WOODPECKER_WEBHOOK_HOST=http://woodpecker-server:8000
+    volumes:
+      - woodpecker-data:/var/lib/woodpecker
+    ports:
+      - "8000:8000"
+      - "9000:9000"   # gRPC for agents
+    depends_on:
+      - gitea
+    networks:
+      - pipeline
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v2
+    container_name: pli-wp-agent
+    restart: unless-stopped
+    environment:
+      - WOODPECKER_SERVER=woodpecker-server:9000
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET:-supersecretagentkey}
+      - WOODPECKER_MAX_WORKFLOWS=2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - woodpecker-server
+    networks:
+      - pipeline
+
+  # ---------------------------------------------------------------------------
+  # Static analysis (SAST)
+  # ---------------------------------------------------------------------------
+  sonarqube:
+    image: sonarqube:10-community
+    container_name: pli-sonarqube
+    restart: unless-stopped
+    environment:
+      - SONAR_JDBC_URL=jdbc:postgresql://postgres:5432/sonarqube
+      - SONAR_JDBC_USERNAME=sonarqube
+      - SONAR_JDBC_PASSWORD=${SONAR_DB_PASSWORD:-sonarqube}
+    volumes:
+      - sonar-data:/opt/sonarqube/data
+      - sonar-extensions:/opt/sonarqube/extensions
+      - sonar-logs:/opt/sonarqube/logs
+    ports:
+      - "9090:9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pipeline
+    # SonarQube needs this on Linux hosts
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ---------------------------------------------------------------------------
+  # Dynamic analysis (DAST)
+  # ---------------------------------------------------------------------------
+  zap:
+    image: zaproxy/zap-stable:latest
+    container_name: pli-zap
+    restart: unless-stopped
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=${ZAP_API_KEY:-zap-api-key-change-me}
+    volumes:
+      - zap-data:/home/zap/.ZAP
+    ports:
+      - "8090:8080"
+    networks:
+      - pipeline
+
+  # ---------------------------------------------------------------------------
+  # Vulnerability aggregator (alternative/complement to RiskDesk)
+  # ---------------------------------------------------------------------------
+  defectdojo:
+    image: defectdojo/defectdojo-django:latest
+    container_name: pli-defectdojo
+    restart: unless-stopped
+    environment:
+      - DD_DATABASE_ENGINE=django.db.backends.postgresql
+      - DD_DATABASE_HOST=postgres
+      - DD_DATABASE_PORT=5432
+      - DD_DATABASE_NAME=defectdojo
+      - DD_DATABASE_USER=defectdojo
+      - DD_DATABASE_PASSWORD=${DOJO_DB_PASSWORD:-defectdojo}
+      - DD_SECRET_KEY=${DOJO_SECRET_KEY:-change-me-to-a-real-key}
+      - DD_CREDENTIAL_AES_256_KEY=${DOJO_AES_KEY:-0123456789abcdef0123456789abcdef}
+      - DD_CELERY_BROKER_URL=redis://redis:6379/0
+      - DD_ALLOWED_HOSTS=*
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - pipeline
+
+  defectdojo-celery:
+    image: defectdojo/defectdojo-django:latest
+    container_name: pli-dojo-celery
+    restart: unless-stopped
+    command: celery -A dojo worker -l info --concurrency 2
+    environment:
+      - DD_DATABASE_ENGINE=django.db.backends.postgresql
+      - DD_DATABASE_HOST=postgres
+      - DD_DATABASE_PORT=5432
+      - DD_DATABASE_NAME=defectdojo
+      - DD_DATABASE_USER=defectdojo
+      - DD_DATABASE_PASSWORD=${DOJO_DB_PASSWORD:-defectdojo}
+      - DD_SECRET_KEY=${DOJO_SECRET_KEY:-change-me-to-a-real-key}
+      - DD_CREDENTIAL_AES_256_KEY=${DOJO_AES_KEY:-0123456789abcdef0123456789abcdef}
+      - DD_CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - defectdojo
+      - redis
+    networks:
+      - pipeline
+
+  # ---------------------------------------------------------------------------
+  # Agents (requirement 5: scanning performed by agents)
+  # ---------------------------------------------------------------------------
+  trivy-agent:
+    build: ./trivy-agent
+    container_name: pli-trivy-agent
+    restart: unless-stopped
+    environment:
+      - RISKDESK_URL=http://${HOST_IP:-localhost}:8080
+      - RISKDESK_API_TOKEN=${RISKDESK_PIPELINE_TOKEN}
+      - DOJO_URL=http://defectdojo:8080
+      - DOJO_API_TOKEN=${DOJO_API_TOKEN}
+      - SCAN_INTERVAL=${TRIVY_SCAN_INTERVAL:-3600}
+      - TRIVY_CACHE_DIR=/cache
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - trivy-cache:/cache
+      - trivy-results:/results
+    networks:
+      - pipeline
+
+  openscap-agent:
+    build: ./openscap-agent
+    container_name: pli-openscap-agent
+    restart: unless-stopped
+    environment:
+      - RISKDESK_URL=http://${HOST_IP:-localhost}:8080
+      - RISKDESK_API_TOKEN=${RISKDESK_PIPELINE_TOKEN}
+      - SCAN_INTERVAL=${OPENSCAP_SCAN_INTERVAL:-86400}
+    volumes:
+      - openscap-results:/results
+      - /etc:/host-etc:ro           # read host config for compliance scanning
+      - /proc:/host-proc:ro
+    privileged: true                 # required for host-level compliance checks
+    networks:
+      - pipeline
+
+  # ---------------------------------------------------------------------------
+  # Shared infrastructure
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: pli-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./configs/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pipeline
+
+  redis:
+    image: redis:7-alpine
+    container_name: pli-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - pipeline
+
+volumes:
+  gitea-data:
+  woodpecker-data:
+  sonar-data:
+  sonar-extensions:
+  sonar-logs:
+  zap-data:
+  postgres-data:
+  redis-data:
+  trivy-cache:
+  trivy-results:
+  openscap-results:
+
+networks:
+  pipeline:
+    driver: bridge

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RiskDesk</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="seal-rule"></div>
+
+<header class="masthead">
+  <div class="brand">
+    <span class="brand-mark">RiskDesk</span>
+    <span class="brand-sub" id="orgName">&nbsp;</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab is-active" data-view="findings">Findings</button>
+    <button class="tab" data-view="register">Register</button>
+    <button class="tab" data-view="activity">Activity</button>
+    <button class="tab" data-view="exceptions">Exceptions</button>
+    <button class="tab" data-view="compliance">Compliance</button>
+    <button class="tab" data-view="rules">Rules</button>
+    <button class="tab" data-view="sources">Sources</button>
+    <button class="tab" data-view="settings">Settings</button>
+  </nav>
+  <div class="whoami">
+    <label class="micro" for="userSelect">Acting as</label>
+    <select id="userSelect" class="mono"></select>
+  </div>
+</header>
+
+<div id="demoBanner" class="demo-banner" hidden>
+  <strong>Demo data present.</strong>
+  <span id="demoCount"></span> findings in this database were generated locally and are not
+  scan results. Do not quote them. Clear them with <code>python -m app.cli reset</code>.
+</div>
+
+<!-- ============================ FINDINGS ============================ -->
+<main id="view-findings" class="view">
+  <aside class="rail">
+    <div class="rail-scroll">
+      <section class="stats" id="statStrip"></section>
+
+      <div class="rail-block">
+        <div class="micro-label">Search</div>
+        <input id="qInput" type="search" class="field mono" placeholder="CVE, host, package, path">
+      </div>
+
+      <div class="rail-block">
+        <div class="micro-label">Saved views</div>
+        <div id="savedViews" class="quick"></div>
+        <button id="saveCurrentView" class="link" style="margin-top:6px;font-size:11px">Save current filter</button>
+      </div>
+
+      <div class="rail-block">
+        <div class="micro-label">Quick views</div>
+        <div class="quick" id="quickViews">
+          <button data-quick="undecided">Not yet adjudicated</button>
+          <button data-quick="kev">On the KEV catalog</button>
+          <button data-quick="overdue">Past remediation SLA</button>
+          <button data-quick="fixable">A fix is published</button>
+          <button data-quick="accepted">Accepted risk</button>
+          <button data-quick="clear">Clear all filters</button>
+        </div>
+      </div>
+
+      <div class="rail-block" id="facetSource"></div>
+      <div class="rail-block" id="facetSeverity"></div>
+      <div class="rail-block" id="facetDisposition"></div>
+      <div class="rail-block" id="facetCategory"></div>
+    </div>
+  </aside>
+
+  <section class="pane">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <label class="checkbox"><input type="checkbox" id="selectPage"><span></span></label>
+        <span class="count" id="resultCount">&nbsp;</span>
+      </div>
+      <div class="toolbar-right">
+        <label class="micro" for="sortSelect">Sort</label>
+        <select id="sortSelect" class="field-sm">
+          <option value="risk">Risk score</option>
+          <option value="severity">Severity</option>
+          <option value="age">Oldest first</option>
+          <option value="asset">Asset</option>
+          <option value="cve">Identifier</option>
+        </select>
+        <a id="exportFindings" class="btn-ghost" href="#">Export CSV</a>
+      </div>
+    </div>
+
+    <div id="selectAllBar" class="select-all" hidden>
+      <span id="selectAllText"></span>
+      <button id="selectAllMatching" class="link">Select all matching</button>
+      <button id="clearSelection" class="link">Clear</button>
+    </div>
+
+    <div id="findingsList" class="rows"></div>
+
+    <div class="pager">
+      <button id="prevPage" class="btn-ghost">Previous</button>
+      <span id="pageLabel" class="mono micro"></span>
+      <button id="nextPage" class="btn-ghost">Next</button>
+    </div>
+  </section>
+</main>
+
+<!-- ============================ REGISTER ============================ -->
+<main id="view-register" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <div class="seg" id="regState">
+          <button data-state="" class="is-active">All</button>
+          <button data-state="pending_approval">Awaiting approval</button>
+          <button data-state="approved">In force</button>
+          <button data-state="expired">Expired</button>
+          <button data-state="rejected">Rejected</button>
+          <button data-state="revoked">Revoked</button>
+        </div>
+      </div>
+      <div class="toolbar-right">
+        <input id="regSearch" type="search" class="field-sm mono" placeholder="Search decisions">
+        <button id="regDue" class="btn-ghost">Due within 30 days</button>
+        <a class="btn-ghost" href="/api/export/register.csv">Export register</a>
+      </div>
+    </div>
+    <div id="registerList" class="rows"></div>
+  </section>
+</main>
+
+<!-- ============================ ACTIVITY ============================ -->
+<main id="view-activity" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Audit trail</span></div></div>
+    <div id="auditList" class="rows"></div>
+  </section>
+</main>
+
+<!-- ============================ COMPLIANCE ============================ -->
+<main id="view-compliance" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">CIS &amp; STIG compliance</span></div>
+      <div class="toolbar-right">
+        <label class="btn" style="cursor:pointer">
+          Import CSV
+          <input type="file" id="complianceFile" accept=".csv" hidden>
+        </label>
+      </div>
+    </div>
+    <div id="complianceSummary" style="padding:18px"></div>
+    <div id="complianceDetail"></div>
+  </section>
+</main>
+
+<!-- ============================ EXCEPTIONS ============================ -->
+<main id="view-exceptions" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <div class="seg" id="excState">
+          <button data-state="" class="is-active">All</button>
+          <button data-state="submitted">Submitted</button>
+          <button data-state="under_review">Under review</button>
+          <button data-state="info_requested">Info requested</button>
+          <button data-state="approved">Approved</button>
+          <button data-state="rejected">Rejected</button>
+        </div>
+      </div>
+      <div class="toolbar-right">
+        <button id="myExceptions" class="btn-ghost">My submissions</button>
+        <button id="myReviews" class="btn-ghost">Assigned to me</button>
+        <input id="excSearch" type="search" class="field-sm mono" placeholder="Search exceptions">
+      </div>
+    </div>
+    <div id="exceptionsList" class="rows"></div>
+  </section>
+</main>
+
+<!-- ============================ RULES ============================ -->
+<main id="view-rules" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Assignment rules</span></div>
+      <div class="toolbar-right">
+        <button id="newRule" class="btn">New rule</button>
+        <button id="previewRules" class="btn-ghost">Preview all rules</button>
+        <button id="runRules" class="btn-ghost">Run now</button>
+      </div>
+    </div>
+    <div class="hint" style="padding:12px 18px 0;max-width:680px">
+      Rules evaluate in priority order (lowest number first) against open findings.
+      First match wins. After every sync, new findings are automatically routed through
+      these rules. Criteria use AND logic — every non-empty field must match.
+    </div>
+    <div id="rulesList" class="rows" style="margin-top:8px"></div>
+    <div id="rulePreview" style="padding:0 18px 30px"></div>
+  </section>
+</main>
+
+<!-- ============================ SOURCES ============================ -->
+<main id="view-sources" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Connected sources</span></div>
+      <div class="toolbar-right">
+        <button id="enrichBtn" class="btn-ghost">Update EPSS &amp; KEV feeds</button>
+      </div>
+    </div>
+    <div id="sourceCards" class="source-grid"></div>
+    <div class="toolbar"><div class="toolbar-left"><span class="count">API configuration</span></div></div>
+    <div id="configCards" class="source-grid"></div>
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Import schedules</span></div></div>
+    <div id="scheduleCards" class="source-grid"></div>
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Sync history</span></div></div>
+    <div id="syncList" class="rows"></div>
+  </section>
+</main>
+
+<!-- ============================ SETTINGS ============================ -->
+<main id="view-settings" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar"><div class="toolbar-left"><span class="count">API tokens</span></div>
+      <div class="toolbar-right"><button id="newToken" class="btn">Create token</button></div>
+    </div>
+    <div id="tokenList" class="rows" style="max-height:300px;overflow-y:auto"></div>
+
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Asset correlation</span></div>
+      <div class="toolbar-right">
+        <button id="autoCorrelate" class="btn-ghost">Auto-correlate by hostname</button>
+      </div>
+    </div>
+    <div id="correlationStats" style="padding:0 18px"></div>
+    <div id="correlationList" class="rows" style="max-height:400px;overflow-y:auto"></div>
+
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Pipeline containers</span></div>
+      <div class="toolbar-right"><button id="refreshContainers" class="btn-ghost">Refresh</button></div>
+    </div>
+    <div id="containerList" class="rows"></div>
+  </section>
+</main>
+
+<!-- ============================ OVERLAYS ============================ -->
+<div id="scrim" class="scrim" hidden></div>
+<aside id="detail" class="drawer" hidden aria-label="Finding detail"></aside>
+<aside id="decide" class="drawer drawer-wide" hidden aria-label="Record a decision"></aside>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

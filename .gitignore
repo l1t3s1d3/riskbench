@@ -1,0 +1,52 @@
+# ============================================================================
+# PLI Security Platform — .gitignore
+# ============================================================================
+
+# --- Secrets (never commit) -------------------------------------------------
+.env
+*.env.local
+riskdesk/.env
+devsecops-pipeline/.env
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# --- Virtual environments ---------------------------------------------------
+.venv/
+venv/
+ENV/
+
+# --- RiskDesk runtime -------------------------------------------------------
+riskdesk/data/
+riskdesk/*.db
+riskdesk/*.db-wal
+riskdesk/*.db-shm
+
+# --- IDE / editor -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Docker -----------------------------------------------------------------
+devsecops-pipeline/trivy-agent/__pycache__/
+devsecops-pipeline/openscap-agent/__pycache__/
+
+# --- Backups and outputs ----------------------------------------------------
+backups/
+*.tar.gz
+*.zip
+
+# --- OS files ---------------------------------------------------------------
+.DS_Store
+Desktop.ini
