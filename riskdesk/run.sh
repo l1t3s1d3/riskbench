@@ -5,6 +5,6 @@ cd "$(dirname "$0")"
 source .venv/bin/activate
 pip install -q -r requirements.txt
 [ -f .env ] || { cp .env.example .env; echo "Created .env from the template. Add credentials when you have them."; }
-python -m app.cli init
+python3 -m app.cli init
 echo "RiskDesk on http://127.0.0.1:8080"
-python -m app.cli serve "$@"
+python3 -m app.cli serve "$@"
