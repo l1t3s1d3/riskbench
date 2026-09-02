@@ -114,6 +114,19 @@ settings = Settings()
 
 
 def reload_settings() -> Settings:
-    global settings
-    settings = Settings()
+    """Rebuild settings from current os.environ, updating the existing object.
+
+    Updating in place means every module that imported `from .config import settings`
+    sees the new values without needing to re-import.
+    """
+    fresh = Settings()
+    settings.wiz = fresh.wiz
+    settings.falcon = fresh.falcon
+    settings.github = fresh.github
+    settings.policy = fresh.policy
+    settings.users = fresh.users
+    settings.approvers = fresh.approvers
+    settings.default_user = fresh.default_user
+    settings.org_name = fresh.org_name
+    settings.stale_after_days = fresh.stale_after_days
     return settings
