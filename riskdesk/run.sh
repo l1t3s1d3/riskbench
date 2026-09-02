@@ -12,7 +12,21 @@ fi
 
 if [ ! -d .venv ]; then
     echo "Creating virtual environment..."
-    python3 -m venv .venv
+    if ! python3 -m venv .venv 2>/dev/null; then
+        PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+        echo ""
+        echo "Error: Failed to create virtual environment."
+        echo "On Ubuntu/Debian, the venv module is a separate package."
+        echo "Install it with:"
+        echo ""
+        echo "  sudo apt install python3-venv python3-pip"
+        echo ""
+        echo "Or for your specific Python version:"
+        echo ""
+        echo "  sudo apt install python${PY_VER}-venv"
+        echo ""
+        exit 1
+    fi
 fi
 
 source .venv/bin/activate
