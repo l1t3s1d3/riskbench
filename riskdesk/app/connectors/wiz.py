@@ -170,10 +170,10 @@ class WizConnector(Connector):
         except Exception as exc:
             return False, str(exc)
         try:
-            data = self.graphql("query { viewer { id } }", {})
+            data = self.graphql("query { __typename }", {})
         except Exception as exc:
             return False, f"Authenticated, but the GraphQL probe failed: {exc}"
-        return True, f"Connected to {self.cfg.api_url} as {data.get('viewer', {}).get('id', 'service account')}."
+        return True, f"Connected to {self.cfg.api_url}."
 
     # --- transport ----------------------------------------------------------
 
