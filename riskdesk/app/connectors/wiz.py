@@ -258,18 +258,31 @@ class WizConnector(Connector):
                 return
 
     def _fetch_vulns(self) -> Iterator[NormalizedRecord]:
-        for node in self._paginate(VULN_FINDINGS_QUERY, "vulnerabilityFindings",
-                                   {"status": ["OPEN", "IN_PROGRESS"]}):
-            rec = self._map_vuln(node)
-            if rec is not None:
-                yield rec
+        log.info("Fetching vulnerability findings from Wiz (filter: status OPEN/IN_PROGRESS)")
+        count = 0
+        try:
+            for node in self._paginate(VULN_FINDINGS_QUERY, "vulnerabilityFindings",
+                                       {"status": ["OPEN", "IN_PROGRESS"]}):
+                rec = self._map_vuln(node)
+                if rec is not None:
+                    count += 1
+                    yield rec
+        except Exception as exc:
+            log.error("Wiz vulnerability query failed: %s", exc)
+            log.error("Your tenant schema may differ. Run: python -m app.cli wiz-introspect --type VulnerabilityFinding")
+            raise
+        log.info("Wiz vulnerability findings fetched: %d", count)
 
     def _fetch_config(self) -> Iterator[NormalizedRecord]:
+        log.info("Fetching configuration findings from Wiz (filter: result FAIL)")
+        count = 0
         for node in self._paginate(CONFIG_FINDINGS_QUERY, "configurationFindings",
                                    {"result": ["FAIL"]}):
             rec = self._map_config(node)
             if rec is not None:
+                count += 1
                 yield rec
+        log.info("Wiz configuration findings fetched: %d", count)
 
     # --- mappers ------------------------------------------------------------
 

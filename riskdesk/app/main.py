@@ -478,6 +478,53 @@ def check_source(source: str):
     return {"source": source, "ok": ok, "message": message}
 
 
+@app.get("/api/sync/diagnose/wiz")
+def diagnose_wiz(request: Request):
+    """Run diagnostic queries against Wiz to check schema compatibility."""
+    from .connectors.wiz import WizConnector
+    c = WizConnector()
+    if not c.configured():
+        return {"ok": False, "error": "Not configured"}
+    results = {}
+    try:
+        c._get_token()
+        results["auth"] = "ok"
+    except Exception as exc:
+        return {"ok": False, "auth": str(exc)}
+    for type_name in ("VulnerabilityFinding", "ConfigurationFinding",
+                      "VulnerableAssetBase", "VulnerableAssetVirtualMachine"):
+        try:
+            fields = c.introspect(type_name)
+            results[type_name] = fields if fields else "not found in schema"
+        except Exception as exc:
+            results[type_name] = f"error: {exc}"
+    try:
+        data = c.graphql(
+            "query { vulnerabilityFindings(first: 1) { totalCount nodes { id name status } } }",
+            {},
+        )
+        block = data.get("vulnerabilityFindings") or {}
+        results["vuln_probe"] = {
+            "totalCount": block.get("totalCount"),
+            "sample": (block.get("nodes") or [None])[0],
+        }
+    except Exception as exc:
+        results["vuln_probe"] = f"error: {exc}"
+    try:
+        data = c.graphql(
+            "query { configurationFindings(first: 1) { totalCount nodes { id severity result } } }",
+            {},
+        )
+        block = data.get("configurationFindings") or {}
+        results["config_probe"] = {
+            "totalCount": block.get("totalCount"),
+            "sample": (block.get("nodes") or [None])[0],
+        }
+    except Exception as exc:
+        results["config_probe"] = f"error: {exc}"
+    return {"ok": True, "diagnostics": results}
+
+
 @app.get("/api/sync/runs")
 def sync_runs(limit: int = 50, db=Depends(get_session)):
     rows = db.execute(
