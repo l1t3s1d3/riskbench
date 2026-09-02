@@ -120,7 +120,7 @@ def save_config(db, source: str, config: dict, actor: str) -> dict:
         db.add(row)
 
     # Merge: only update fields that were provided (don't blank out secrets not resent)
-    current = row.config or {}
+    current = dict(row.config or {})
     for key, value in config.items():
         if value is not None and value != "":
             current[key] = value
@@ -129,6 +129,7 @@ def save_config(db, source: str, config: dict, actor: str) -> dict:
             if value == "":
                 current.pop(key, None)
 
+    # Reassign so SQLAlchemy detects the change (JSON columns don't track mutations)
     row.config = current
     row.updated_by = actor
     db.commit()
