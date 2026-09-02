@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-[ -d .venv ] || python3 -m venv .venv
+
+if ! command -v python3 &>/dev/null; then
+    echo "Error: python3 not found. Install Python 3.10+ first."
+    echo "  Ubuntu/Debian: sudo apt install python3 python3-venv python3-pip"
+    echo "  macOS:         brew install python3"
+    echo "  RHEL/Fedora:   sudo dnf install python3"
+    exit 1
+fi
+
+if [ ! -d .venv ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv .venv
+fi
+
 source .venv/bin/activate
-pip install -q -r requirements.txt
+python3 -m pip install -q -r requirements.txt
 [ -f .env ] || { cp .env.example .env; echo "Created .env from the template. Add credentials when you have them."; }
 python3 -m app.cli init
 echo "RiskDesk on http://127.0.0.1:8080"
