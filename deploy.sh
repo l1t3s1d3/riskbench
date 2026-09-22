@@ -240,9 +240,9 @@ GITHUB_SECRET_SCANNING=1
 
 # --- People -----------------------------------------------------------------
 RISKDESK_ORG_NAME=PLI
-RISKDESK_USERS=lucas,liang,ezechias,derron,igor,eric.poon,chris
-RISKDESK_APPROVERS=chris,eric.poon,lucas,liang
-RISKDESK_DEFAULT_USER=lucas
+RISKDESK_USERS=admin1,admin2,security1,team1,team2,executive1,executive2
+RISKDESK_APPROVERS=executive1,executive2,admin1,admin2
+RISKDESK_DEFAULT_USER=admin1
 RISKDESK_REQUIRE_SEPARATE_APPROVER=1
 RISKDESK_STALE_DAYS=14
 
@@ -328,7 +328,7 @@ GITEA_OAUTH_CLIENT_ID=
 GITEA_OAUTH_CLIENT_SECRET=
 
 # Woodpecker
-WOODPECKER_ADMIN=lucas
+WOODPECKER_ADMIN=admin1
 WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET}
 
 # Database passwords (auto-generated, unique to this deployment)
@@ -423,16 +423,16 @@ from app.models import User
 from app.tokens import create_token
 
 db = SessionLocal()
-user = db.query(User).filter(User.username == 'lucas').first()
+user = db.query(User).filter(User.username == 'admin1').first()
 if not user:
-    print('ERROR: no lucas user')
+    print('ERROR: no admin1 user')
     exit(1)
 _, plaintext = create_token(db, user, 'DevSecOps Pipeline', expires_days=365)
 db.close()
 print(plaintext)
 " 2>/dev/null || echo "")
 
-if [ -n "$PIPELINE_TOKEN" ] && [ "$PIPELINE_TOKEN" != "ERROR: no lucas user" ]; then
+if [ -n "$PIPELINE_TOKEN" ] && [ "$PIPELINE_TOKEN" != "ERROR: no admin1 user" ]; then
     # Write the token into the pipeline .env
     sed -i "s|^RISKDESK_PIPELINE_TOKEN=.*|RISKDESK_PIPELINE_TOKEN=${PIPELINE_TOKEN}|" \
         "${INSTALL_DIR}/pipeline/.env"
@@ -604,7 +604,7 @@ echo "    Sunday 5 AM   Backup Docker volumes"
 echo ""
 echo -e "${YELLOW}  First-time setup (manual):${NC}"
 echo "    1. Open Gitea at http://${HOST_IP}:3000"
-echo "       Create an admin account (username: lucas)"
+echo "       Create an admin account (username: admin1)"
 echo ""
 echo "    2. In Gitea → Settings → Applications → OAuth2 Applications:"
 echo "       Create app: Name='Woodpecker CI'"
@@ -618,7 +618,7 @@ echo ""
 echo "    5. Add connector credentials in RiskDesk → Sources tab"
 echo "       (Wiz, Falcon, GitHub — or configure in ${INSTALL_DIR}/riskdesk/.env)"
 echo ""
-if [ -n "$PIPELINE_TOKEN" ] && [ "$PIPELINE_TOKEN" != "ERROR: no lucas user" ]; then
+if [ -n "$PIPELINE_TOKEN" ] && [ "$PIPELINE_TOKEN" != "ERROR: no admin1 user" ]; then
 echo -e "  ${GREEN}Pipeline API token auto-configured.${NC}"
 echo "  Agents will report to RiskDesk automatically."
 else

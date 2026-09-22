@@ -103,7 +103,7 @@ On Windows, run `run.ps1` or `run.bat` instead — they handle venv creation and
 
 **Re-import idempotency.** Unique constraint on (source, source_finding_id). Re-syncing never creates duplicates.
 
-**Role hierarchy.** admin (Lucas, Liang) → executive (Eric, Chris) → security (Ezechias) → team (Derron, Igor) → viewer.
+**Role hierarchy.** admin → executive → security → team → viewer.
 
 ---
 
@@ -271,9 +271,9 @@ riskbench/
 
 Built for PLI (Practising Law Institute), a legal education organization serving attorneys and judges. The security team is ~3 people. The environment includes Azure and AWS cloud, CrowdStrike Falcon Complete, Wiz, GitHub Advanced Security, Microsoft Purview, and SolarWinds.
 
-Key people and roles in the system:
-- **Lucas, Liang** — admin role (full access)
-- **Eric Poon** (CIO), **Chris** — executive role (approve decisions, view reports)
-- **Ezechias** — security role (triage, adjudicate, manage scans)
-- **Derron** — team role (endpoint work, assigned findings)
-- **Igor** — team role (network devices, assigned findings)
+Default roles in the system:
+- **admin** — full access, manages users and platform configuration
+- **executive** — approves risk decisions, views reports
+- **security** — triages, adjudicates, manages scans and rules
+- **team** — works assigned findings, submits exceptions
+- **viewer** — read-only access

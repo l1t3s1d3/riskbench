@@ -285,7 +285,7 @@ that currently need the most human judgment. The schema has the columns; they ju
 a populator.
 
 Remediation SLAs come from `app/config.py` — 15/30/90/180 days by severity, with KEV
-capped at 14. Change those to whatever Chris signs off on.
+capped at 14. Change those to whatever your executive sponsor signs off on.
 
 ---
 
