@@ -528,41 +528,60 @@ def diagnose_wiz(request: Request):
 @app.post("/api/wiz/query")
 async def wiz_query(request: Request):
     """Execute an arbitrary GraphQL query against the connected Wiz tenant."""
+    import traceback
     from .connectors.wiz import WizConnector
-    body = await request.json()
+    from .config import reload_settings
+    reload_settings()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
     query = body.get("query", "").strip()
     variables = body.get("variables") or {}
     if not query:
         raise HTTPException(400, "No query provided")
     c = WizConnector()
     if not c.configured():
-        raise HTTPException(400, "Wiz connector is not configured. Set credentials in Sources → Wiz.")
+        return {"ok": False, "error": "Wiz connector is not configured. Set credentials in Sources → Wiz.",
+                "debug": {"client_id": bool(c.cfg.client_id), "client_secret": bool(c.cfg.client_secret),
+                          "api_url": c.cfg.api_url or "(empty)"}}
     try:
         c._get_token()
     except Exception as exc:
-        raise HTTPException(502, f"Wiz authentication failed: {exc}")
+        return {"ok": False, "error": f"Wiz authentication failed: {exc}",
+                "traceback": traceback.format_exc()}
     try:
         data = c.graphql(query, variables, attempts=2)
     except Exception as exc:
-        raise HTTPException(502, f"Wiz GraphQL error: {exc}")
+        return {"ok": False, "error": f"Wiz GraphQL error: {exc}",
+                "traceback": traceback.format_exc()}
     return {"ok": True, "data": data}
 
 
 @app.post("/api/wiz/introspect")
 async def wiz_introspect_type(request: Request):
     """Introspect a Wiz GraphQL type to discover available fields."""
+    import traceback
     from .connectors.wiz import WizConnector
-    body = await request.json()
+    from .config import reload_settings
+    reload_settings()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
     type_name = body.get("type", "").strip()
     if not type_name:
         raise HTTPException(400, "No type name provided")
     c = WizConnector()
     if not c.configured():
-        raise HTTPException(400, "Wiz connector is not configured.")
+        return {"ok": False, "error": "Wiz connector is not configured.",
+                "debug": {"client_id": bool(c.cfg.client_id), "client_secret": bool(c.cfg.client_secret),
+                          "api_url": c.cfg.api_url or "(empty)"}}
     try:
         fields = c.introspect(type_name)
     except Exception as exc:
-        raise HTTPException(502, f"Introspection failed: {exc}")
+        return {"ok": False, "error": f"Introspection failed: {exc}",
+                "traceback": traceback.format_exc()}
     return {"ok": True, "type": type_name, "fields": fields}
 
 

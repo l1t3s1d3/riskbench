@@ -1959,13 +1959,23 @@ async function runWizQuery() {
     const t0 = Date.now();
     const res = await api('/api/wiz/query', { method: 'POST', body: JSON.stringify({ query, variables }) });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    _wizLastResult = res.data;
-    $('wizQueryResult').textContent = JSON.stringify(res.data, null, 2);
-    $('wizQueryResult').style.display = 'block';
-    $('wizQueryStatus').textContent = `Completed in ${elapsed}s`;
-    $('wizExportJSON').disabled = false;
-    $('wizExportCSV').disabled = false;
-    $('wizCopyResult').disabled = false;
+    if (res.ok === false) {
+      const detail = res.error + (res.traceback ? '\n\n' + res.traceback : '') + (res.debug ? '\n\nDebug: ' + JSON.stringify(res.debug) : '');
+      $('wizQueryResult').textContent = detail;
+      $('wizQueryResult').style.display = 'block';
+      $('wizQueryStatus').textContent = 'Query failed';
+      $('wizExportJSON').disabled = true;
+      $('wizExportCSV').disabled = true;
+      $('wizCopyResult').disabled = true;
+    } else {
+      _wizLastResult = res.data;
+      $('wizQueryResult').textContent = JSON.stringify(res.data, null, 2);
+      $('wizQueryResult').style.display = 'block';
+      $('wizQueryStatus').textContent = `Completed in ${elapsed}s`;
+      $('wizExportJSON').disabled = false;
+      $('wizExportCSV').disabled = false;
+      $('wizCopyResult').disabled = false;
+    }
   } catch (e) {
     $('wizQueryResult').textContent = e.message || String(e);
     $('wizQueryResult').style.display = 'block';
@@ -1985,13 +1995,20 @@ async function runWizIntrospect() {
   $('wizIntrospectBtn').textContent = 'Loading…';
   try {
     const res = await api('/api/wiz/introspect', { method: 'POST', body: JSON.stringify({ type: typeName }) });
-    _wizLastResult = { type: typeName, fields: res.fields };
-    $('wizQueryResult').textContent = (res.fields || []).join('\n') || 'No fields found';
-    $('wizQueryResult').style.display = 'block';
-    $('wizQueryStatus').textContent = `${(res.fields || []).length} fields on ${typeName}`;
-    $('wizExportJSON').disabled = false;
-    $('wizExportCSV').disabled = true;
-    $('wizCopyResult').disabled = false;
+    if (res.ok === false) {
+      const detail = res.error + (res.traceback ? '\n\n' + res.traceback : '') + (res.debug ? '\n\nDebug: ' + JSON.stringify(res.debug) : '');
+      $('wizQueryResult').textContent = detail;
+      $('wizQueryResult').style.display = 'block';
+      $('wizQueryStatus').textContent = 'Introspection failed';
+    } else {
+      _wizLastResult = { type: typeName, fields: res.fields };
+      $('wizQueryResult').textContent = (res.fields || []).join('\n') || 'No fields found';
+      $('wizQueryResult').style.display = 'block';
+      $('wizQueryStatus').textContent = `${(res.fields || []).length} fields on ${typeName}`;
+      $('wizExportJSON').disabled = false;
+      $('wizExportCSV').disabled = true;
+      $('wizCopyResult').disabled = false;
+    }
   } catch (e) {
     $('wizQueryResult').textContent = e.message || String(e);
     $('wizQueryResult').style.display = 'block';
