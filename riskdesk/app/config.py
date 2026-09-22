@@ -68,7 +68,7 @@ class GitHubConfig:
 
 @dataclass
 class Policy:
-    """Adjudication policy. Change these to match what Chris signs off on."""
+    """Adjudication policy. Change these to match your executive sponsor's sign-off."""
     # Maximum life of a risk acceptance before it must be re-argued, by the
     # severity it was accepted at.
     max_acceptance_days: dict = field(default_factory=lambda: {
@@ -101,10 +101,10 @@ class Settings:
     # Local identity. This build has no SSO; the current user is whoever the
     # browser session says it is, chosen from this roster. See README.
     users: list[str] = field(default_factory=lambda: _list(
-        "RISKDESK_USERS", "lucas,liang,ezechias,derron,igor,eric.poon,chris"))
+        "RISKDESK_USERS", "admin1,admin2,security1,team1,team2,executive1,executive2"))
     approvers: list[str] = field(default_factory=lambda: _list(
-        "RISKDESK_APPROVERS", "chris,eric.poon,lucas,liang"))
-    default_user: str = field(default_factory=lambda: os.getenv("RISKDESK_DEFAULT_USER", "lucas"))
+        "RISKDESK_APPROVERS", "executive1,executive2,admin1,admin2"))
+    default_user: str = field(default_factory=lambda: os.getenv("RISKDESK_DEFAULT_USER", "admin1"))
     org_name: str = field(default_factory=lambda: os.getenv("RISKDESK_ORG_NAME", "PLI"))
     # Findings not seen in this many days are marked stale by the sync.
     stale_after_days: int = field(default_factory=lambda: _int("RISKDESK_STALE_DAYS", 14))

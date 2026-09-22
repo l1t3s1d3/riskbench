@@ -217,6 +217,41 @@
     <div id="scheduleCards" class="source-grid"></div>
     <div class="toolbar"><div class="toolbar-left"><span class="count">Sync history</span></div></div>
     <div id="syncList" class="rows"></div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Wiz GraphQL Query Builder</span></div>
+      <div class="toolbar-right">
+        <button id="wizIntrospectBtn" class="btn-ghost">Introspect Type</button>
+        <button id="wizQueryBtn" class="btn">Run Query</button>
+      </div>
+    </div>
+    <div id="wizQueryBuilder" style="margin-bottom:24px">
+      <div style="display:flex;gap:12px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">GraphQL Query</label>
+          <textarea id="wizQueryInput" class="field" rows="12" style="font-family:monospace;font-size:13px;white-space:pre;resize:vertical" placeholder='query {
+  vulnerabilityFindings(first: 5, filterBy: {status: [OPEN]}) {
+    totalCount
+    nodes { id name CVSSSeverity status }
+    pageInfo { hasNextPage endCursor }
+  }
+}'></textarea>
+        </div>
+        <div style="width:280px">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">Variables (JSON)</label>
+          <textarea id="wizVarsInput" class="field" rows="4" style="font-family:monospace;font-size:13px;resize:vertical" placeholder='{}'></textarea>
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted);margin-top:8px;display:block">Introspect Type Name</label>
+          <input id="wizIntrospectType" class="field" placeholder="VulnerabilityFinding" style="font-family:monospace;font-size:13px">
+        </div>
+      </div>
+      <div id="wizQueryStatus" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="wizExportJSON" class="btn-ghost" style="font-size:12px" disabled>Export JSON</button>
+        <button id="wizExportCSV" class="btn-ghost" style="font-size:12px" disabled>Export CSV</button>
+        <button id="wizCopyResult" class="btn-ghost" style="font-size:12px" disabled>Copy to Clipboard</button>
+      </div>
+      <pre id="wizQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
+    </div>
   </section>
 </main>
 

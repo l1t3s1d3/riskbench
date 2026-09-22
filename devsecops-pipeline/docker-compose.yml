@@ -52,7 +52,7 @@ services:
     environment:
       - WOODPECKER_HOST=http://${HOST_IP:-localhost}:8000
       - WOODPECKER_OPEN=true
-      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN:-lucas}
+      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN:-admin1}
       - WOODPECKER_GITEA=true
       - WOODPECKER_GITEA_URL=http://gitea:3000
       - WOODPECKER_GITEA_CLIENT=${GITEA_OAUTH_CLIENT_ID}

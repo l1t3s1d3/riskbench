@@ -165,9 +165,9 @@ def _legacy_user(db, request: Request) -> User:
     user = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
     if not user:
         role_map = {
-            "lucas": "admin", "liang": "admin",
-            "eric.poon": "executive", "chris": "executive",
-            "ezechias": "security",
+            "admin1": "admin", "admin2": "admin",
+            "executive1": "executive", "executive2": "executive",
+            "security1": "security",
         }
         user = User(
             username=username, display_name=username,
@@ -295,13 +295,13 @@ def seed_default_users(db):
     # security:   reviews exceptions, creates adjudications, manages rules
     # team:       submits exceptions, views findings assigned to them
     role_map = {
-        "lucas": "admin",
-        "liang": "admin",
-        "eric.poon": "executive",
-        "chris": "executive",
-        "ezechias": "security",
-        "derron": "team",
-        "igor": "team",
+        "admin1": "admin",
+        "admin2": "admin",
+        "executive1": "executive",
+        "executive2": "executive",
+        "security1": "security",
+        "team1": "team",
+        "team2": "team",
     }
     for username in settings.users:
         role = role_map.get(username, "team")

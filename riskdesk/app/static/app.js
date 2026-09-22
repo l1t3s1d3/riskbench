@@ -36,7 +36,7 @@ async function api(path, opts = {}) {
 }
 
 function currentUser() {
-  return $('userSelect').value || (state.meta ? state.meta.current_user : 'lucas');
+  return $('userSelect').value || (state.meta ? state.meta.current_user : 'admin1');
 }
 
 function toast(message, isError) {
@@ -1182,7 +1182,7 @@ function openRuleForm(existing) {
         <h3>Rule identity</h3>
         <div class="field-group">
           <label>Name</label>
-          <input id="ruleName" class="field" placeholder="e.g. Critical KEV to Ezechias" value="${esc(r.name || '')}">
+          <input id="ruleName" class="field" placeholder="e.g. Critical KEV to security1" value="${esc(r.name || '')}">
         </div>
         <div class="field-group">
           <label>Description</label>
@@ -1585,7 +1585,7 @@ async function openExceptionDetail(id) {
   el.innerHTML = '<div class="spin">Loading\u2026</div>';
   const e = await api(`/api/exceptions/${id}`);
   const me = currentUser();
-  const isSecurity = (state.meta?.approvers || []).includes(me) || me === 'lucas' || me === 'ezechias';
+  const isSecurity = (state.meta?.approvers || []).includes(me) || (state.meta?.role && ['admin', 'executive', 'security'].includes(state.meta.role));
   const isSubmitter = me === e.submitted_by;
   const canReview = isSecurity && e.status !== 'approved' && e.status !== 'rejected' && e.status !== 'withdrawn';
 
@@ -1937,6 +1937,124 @@ loadSources = async function() {
   await loadConnectorConfig();
   $('enrichBtn').onclick = runEnrichment;
 };
+
+// ---------------------------------------------------------------- Wiz query builder
+
+let _wizLastResult = null;
+
+async function runWizQuery() {
+  const query = $('wizQueryInput').value.trim();
+  if (!query) { toast('Enter a GraphQL query', true); return; }
+  let variables = {};
+  const varsText = $('wizVarsInput').value.trim();
+  if (varsText && varsText !== '{}') {
+    try { variables = JSON.parse(varsText); }
+    catch (e) { toast('Variables must be valid JSON', true); return; }
+  }
+  $('wizQueryBtn').disabled = true;
+  $('wizQueryBtn').textContent = 'Running…';
+  $('wizQueryStatus').textContent = '';
+  $('wizQueryResult').style.display = 'none';
+  try {
+    const t0 = Date.now();
+    const res = await api('/api/wiz/query', { method: 'POST', body: JSON.stringify({ query, variables }) });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    _wizLastResult = res.data;
+    $('wizQueryResult').textContent = JSON.stringify(res.data, null, 2);
+    $('wizQueryResult').style.display = 'block';
+    $('wizQueryStatus').textContent = `Completed in ${elapsed}s`;
+    $('wizExportJSON').disabled = false;
+    $('wizExportCSV').disabled = false;
+    $('wizCopyResult').disabled = false;
+  } catch (e) {
+    $('wizQueryResult').textContent = e.message || String(e);
+    $('wizQueryResult').style.display = 'block';
+    $('wizQueryStatus').textContent = 'Query failed';
+    $('wizExportJSON').disabled = true;
+    $('wizExportCSV').disabled = true;
+    $('wizCopyResult').disabled = true;
+  }
+  $('wizQueryBtn').disabled = false;
+  $('wizQueryBtn').textContent = 'Run Query';
+}
+
+async function runWizIntrospect() {
+  const typeName = $('wizIntrospectType').value.trim();
+  if (!typeName) { toast('Enter a type name to introspect', true); return; }
+  $('wizIntrospectBtn').disabled = true;
+  $('wizIntrospectBtn').textContent = 'Loading…';
+  try {
+    const res = await api('/api/wiz/introspect', { method: 'POST', body: JSON.stringify({ type: typeName }) });
+    _wizLastResult = { type: typeName, fields: res.fields };
+    $('wizQueryResult').textContent = (res.fields || []).join('\n') || 'No fields found';
+    $('wizQueryResult').style.display = 'block';
+    $('wizQueryStatus').textContent = `${(res.fields || []).length} fields on ${typeName}`;
+    $('wizExportJSON').disabled = false;
+    $('wizExportCSV').disabled = true;
+    $('wizCopyResult').disabled = false;
+  } catch (e) {
+    $('wizQueryResult').textContent = e.message || String(e);
+    $('wizQueryResult').style.display = 'block';
+    $('wizQueryStatus').textContent = 'Introspection failed';
+  }
+  $('wizIntrospectBtn').disabled = false;
+  $('wizIntrospectBtn').textContent = 'Introspect Type';
+}
+
+function wizExportJSON() {
+  if (!_wizLastResult) return;
+  const blob = new Blob([JSON.stringify(_wizLastResult, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'wiz-query-result.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function wizExportCSV() {
+  if (!_wizLastResult) return;
+  const nodes = _findNodes(_wizLastResult);
+  if (!nodes.length) { toast('No array data found to export as CSV', true); return; }
+  const keys = [...new Set(nodes.flatMap(n => Object.keys(n)))];
+  const escape = v => {
+    const s = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return s.includes(',') || s.includes('"') || s.includes('\n') ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const csv = [keys.join(','), ...nodes.map(n => keys.map(k => escape(n[k])).join(','))].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'wiz-query-result.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function _findNodes(obj) {
+  if (Array.isArray(obj)) return obj;
+  if (obj && typeof obj === 'object') {
+    if (Array.isArray(obj.nodes)) return obj.nodes;
+    for (const v of Object.values(obj)) {
+      const found = _findNodes(v);
+      if (found.length) return found;
+    }
+  }
+  return [];
+}
+
+function wizCopyResult() {
+  const text = $('wizQueryResult').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard'));
+}
+
+$('wizQueryBtn').onclick = runWizQuery;
+$('wizIntrospectBtn').onclick = runWizIntrospect;
+$('wizExportJSON').onclick = wizExportJSON;
+$('wizExportCSV').onclick = wizExportCSV;
+$('wizCopyResult').onclick = wizCopyResult;
+
+$('wizQueryInput').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runWizQuery(); }
+});
 
 // ---------------------------------------------------------------- settings (tokens + correlation)
 
