@@ -236,6 +236,28 @@
     </div>
 
     <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Wiz Connection Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="wizDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="wizTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="wizDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, OAuth authentication,
+        GraphQL connectivity, schema validation, and data probes. The dry run fetches
+        a handful of records without writing to the database so you can verify the
+        full pipeline.
+      </div>
+      <div id="wizTestSuiteResult" style="display:none"></div>
+      <div id="wizDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">Query templates</span></div>
+      </div>
+      <div id="wizTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+    </div>
+
+    <div class="toolbar">
       <div class="toolbar-left"><span class="count">Wiz GraphQL Query Builder</span></div>
       <div class="toolbar-right">
         <button id="wizIntrospectBtn" class="btn-ghost">Introspect Type</button>

@@ -2105,6 +2105,186 @@ $('wizQueryInput').addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runWizQuery(); }
 });
 
+// ---------------------------------------------------------------- Wiz diagnostics
+
+async function runWizTestSuite() {
+  const btn = $('wizTestSuiteBtn');
+  const el = $('wizTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — this checks config, auth, connectivity, schema, and data probes…</div>';
+
+  try {
+    const res = await api('/api/wiz/test-suite', { method: 'POST' });
+    el.innerHTML = _renderTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${e.message || e}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) extras.push(`API: ${s.config.api_url}`);
+      if (s.total_count != null) extras.push(`Count: ${s.total_count}`);
+      if (s.total_fields != null) extras.push(`${s.total_fields} fields`);
+      if (s.by_severity) extras.push(Object.entries(s.by_severity).map(([k,v]) => `${k}: ${v}`).join(', '));
+      if (s.missing_fields) extras.push(`Missing: ${s.missing_fields.join(', ')}`);
+      if (s.warning) detail += `<div style="color:var(--warning,#e6a700);font-size:12px;margin:2px 0 2px 24px">${_esc(s.warning)}</div>`;
+      if (s.note) extras.push(s.note);
+      if (s.sample) extras.push(`Sample: ${JSON.stringify(s.sample).substring(0, 120)}…`);
+      if (s.mapped_record) extras.push(`Mapped: ${s.mapped_record.canonical_id} → ${s.mapped_record.severity}`);
+      if (s.mapping_error) detail += `<div style="color:var(--danger);font-size:12px;margin:2px 0 2px 24px">Mapping error: ${_esc(s.mapping_error)}</div>`;
+      if (s.raw_node) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw node</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_node, null, 2))}</pre></details>`;
+      }
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+    }
+
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function runWizDryRun() {
+  const btn = $('wizDryRunBtn');
+  const el = $('wizDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample records from Wiz (no database writes)…</div>';
+
+  try {
+    const res = await api('/api/wiz/dry-run', { method: 'POST' });
+    el.innerHTML = _renderDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${e.message || e}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderDryRun(res) {
+  if (!res.ok) {
+    let html = `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+    if (res.traceback) {
+      html += `<details><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap">${_esc(res.traceback)}</pre></details>`;
+    }
+    return html;
+  }
+
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.fetched}</strong> fetched</span>
+    <span style="color:var(--success)"><strong>${res.mapped}</strong> mapped successfully</span>
+    ${res.mapping_errors ? `<span style="color:var(--danger)"><strong>${res.mapping_errors}</strong> mapping errors</span>` : ''}
+  </div>`;
+
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Mapping errors</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">Node ${_esc(e.node_id || '?')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Asset</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.vuln.canonical_id || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset.name || '')} <span style="color:var(--muted)">${_esc(r.asset.region || '')}</span></td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  if (res.raw_sample) {
+    html += `<details style="margin-top:8px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw API response (first record)</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:300px;overflow:auto">${_esc(JSON.stringify(res.raw_sample, null, 2))}</pre></details>`;
+  }
+
+  return html;
+}
+
+async function loadWizTemplates() {
+  try {
+    const res = await api('/api/wiz/query-templates');
+    const el = $('wizTemplates');
+    if (!res.templates || !res.templates.length) { el.style.display = 'none'; return; }
+    el.innerHTML = res.templates.map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._wizTemplates = res.templates;
+  } catch (e) {
+    // templates are a convenience — fail silently
+  }
+}
+
+function _loadTemplate(name) {
+  const t = (window._wizTemplates || []).find(t => t.name === name);
+  if (!t) return;
+  $('wizQueryInput').value = t.query;
+  $('wizVarsInput').value = t.variables && Object.keys(t.variables).length ? JSON.stringify(t.variables, null, 2) : '{}';
+  toast(`Loaded: ${t.label}`);
+  // scroll the query builder into view
+  $('wizQueryInput').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('wizQueryInput').focus();
+}
+
+$('wizTestSuiteBtn').onclick = runWizTestSuite;
+$('wizDryRunBtn').onclick = runWizDryRun;
+
+const _origLoadSources3 = loadSources;
+loadSources = async function() {
+  await _origLoadSources3();
+  loadWizTemplates();
+};
+
 // ---------------------------------------------------------------- settings (tokens + correlation)
 
 async function loadSettings() {

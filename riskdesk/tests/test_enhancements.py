@@ -241,3 +241,42 @@ def test_sync_progress_endpoint_exists(client):
 def test_sync_progress_bad_source(client):
     r = client.get("/api/sync/progress/invalid")
     assert r.status_code == 400
+
+
+# --- 9. Wiz diagnostics / testing ------------------------------------------
+
+def test_wiz_test_suite_unconfigured(client):
+    """Test suite reports config failure when Wiz env vars are missing."""
+    r = client.post("/api/wiz/test-suite")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["failed"] >= 1
+    assert data["steps"][0]["step"] == "config"
+    assert data["steps"][0]["status"] == "fail"
+    # Remaining steps should be skipped
+    assert data["skipped"] > 0
+
+
+def test_wiz_query_templates(client):
+    """Query templates endpoint returns a list of pre-built queries."""
+    r = client.get("/api/wiz/query-templates")
+    assert r.status_code == 200
+    data = r.json()
+    assert "templates" in data
+    assert len(data["templates"]) >= 5
+    names = [t["name"] for t in data["templates"]]
+    assert "count_all" in names
+    assert "full_sync_query" in names
+    assert "introspect_root" in names
+    for t in data["templates"]:
+        assert "query" in t
+        assert "label" in t
+
+
+def test_wiz_dry_run_unconfigured(client):
+    """Dry run gracefully reports when Wiz is not configured."""
+    r = client.post("/api/wiz/dry-run")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "not configured" in data["error"].lower()
