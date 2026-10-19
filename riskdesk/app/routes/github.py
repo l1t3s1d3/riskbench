@@ -706,3 +706,77 @@ def github_list_repos(
         })
 
     return {"org": c.cfg.org, "total": len(repos), "repos": repos}
+
+
+# ---------------------------------------------------------------------------
+#  Query templates — pre-built GitHub API call templates
+# ---------------------------------------------------------------------------
+
+@router.get("/query-templates")
+def github_query_templates():
+    """Return pre-built API call templates for GitHub Advanced Security troubleshooting."""
+    return {"templates": [
+        {
+            "name": "dependabot_open",
+            "label": "Open Dependabot alerts",
+            "description": "All open dependency vulnerability alerts across the org.",
+            "path": "/orgs/{org}/dependabot/alerts",
+            "params": {"state": "open", "per_page": 10},
+        },
+        {
+            "name": "dependabot_critical",
+            "label": "Critical Dependabot alerts",
+            "description": "Only critical-severity Dependabot alerts.",
+            "path": "/orgs/{org}/dependabot/alerts",
+            "params": {"state": "open", "severity": "critical", "per_page": 10},
+        },
+        {
+            "name": "code_scanning_open",
+            "label": "Open code scanning alerts",
+            "description": "CodeQL and third-party SAST alerts across the org.",
+            "path": "/orgs/{org}/code-scanning/alerts",
+            "params": {"state": "open", "per_page": 10},
+        },
+        {
+            "name": "code_scanning_errors",
+            "label": "Code scanning errors / warnings",
+            "description": "Code scanning alerts with error or warning severity.",
+            "path": "/orgs/{org}/code-scanning/alerts",
+            "params": {"state": "open", "severity": "error", "per_page": 10},
+        },
+        {
+            "name": "secret_scanning_open",
+            "label": "Open secret scanning alerts",
+            "description": "Exposed credentials detected across the org.",
+            "path": "/orgs/{org}/secret-scanning/alerts",
+            "params": {"state": "open", "per_page": 10},
+        },
+        {
+            "name": "secret_scanning_active",
+            "label": "Active (verified) secrets",
+            "description": "Secrets that GitHub verified are still valid/active.",
+            "path": "/orgs/{org}/secret-scanning/alerts",
+            "params": {"state": "open", "validity": "active", "per_page": 10},
+        },
+        {
+            "name": "repos_list",
+            "label": "Organization repositories",
+            "description": "List repos sorted by most recently pushed.",
+            "path": "/orgs/{org}/repos",
+            "params": {"sort": "pushed", "direction": "desc", "per_page": 10, "type": "all"},
+        },
+        {
+            "name": "rate_limit",
+            "label": "Rate limit status",
+            "description": "Check your current API rate limit usage.",
+            "path": "/rate_limit",
+            "params": {},
+        },
+        {
+            "name": "org_info",
+            "label": "Organization details",
+            "description": "Basic org info including plan and GHAS enablement.",
+            "path": "/orgs/{org}",
+            "params": {},
+        },
+    ]}

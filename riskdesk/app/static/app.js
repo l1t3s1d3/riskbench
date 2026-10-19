@@ -3149,6 +3149,273 @@ $('ghQueryPath').addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runGhQuery(); }
 });
 
+
+// ===== GitHub query templates ================================================
+
+async function loadGhTemplates() {
+  const el = $('ghTemplates');
+  if (!el) return;
+  try {
+    const res = await api('/api/github/query-templates');
+    el.innerHTML = (res.templates || []).map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadGhTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._ghTemplateData = res.templates;
+  } catch (e) {
+    el.innerHTML = `<span style="font-size:11px;color:var(--muted)">Could not load templates</span>`;
+  }
+}
+
+function _loadGhTemplate(name) {
+  const tpl = (window._ghTemplateData || []).find(t => t.name === name);
+  if (!tpl) return;
+  $('ghQueryPath').value = tpl.path || '';
+  $('ghQueryParams').value = tpl.params ? JSON.stringify(tpl.params, null, 2) : '';
+}
+
+loadGhTemplates();
+
+
+// ===== CrowdStrike Falcon diagnostics ========================================
+
+let _falconLastResult = null;
+
+async function runFalconTestSuite() {
+  const btn = $('falconTestSuiteBtn');
+  const el = $('falconTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — checking config, auth, scope, probes, severity breakdown, and sample mapping…</div>';
+  try {
+    const res = await api('/api/falcon/test-suite', { method: 'POST' });
+    el.innerHTML = _renderFalconTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderFalconTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) {
+        extras.push(`Base URL: ${s.config.base_url}`);
+        extras.push(`CID prefix: ${s.config.client_id_prefix}`);
+        if (s.config.member_cid) extras.push(`Member CID: ${s.config.member_cid}`);
+        extras.push(`FQL: ${s.config.filter_fql}`);
+      }
+      if (s.token_preview) extras.push(`Token: ${s.token_preview}`);
+      if (s.total_matches != null) extras.push(`Total matching: ${s.total_matches}`);
+      if (s.trace_id) extras.push(`Trace: ${s.trace_id}`);
+      if (s.total != null) extras.push(`Total: ${s.total}`);
+      if (s.returned != null) extras.push(`Returned: ${s.returned}`);
+      if (s.note) extras.push(s.note);
+      if (s.fql) extras.push(`FQL: ${s.fql}`);
+      if (s.matching_count != null) extras.push(`Matching: ${s.matching_count}`);
+      if (s.by_severity) {
+        const sevStr = Object.entries(s.by_severity).map(([k, v]) => `${k}: ${v}`).join(', ');
+        extras.push(`Severities: ${sevStr}`);
+      }
+      if (s.total_open != null) extras.push(`Total open: ${s.total_open}`);
+      if (s.mapped) extras.push(`Mapped: ${s.mapped.canonical_id} → ${s.mapped.severity}`);
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+      if (s.sample && typeof s.sample === 'object') {
+        const sampleStr = Object.entries(s.sample).filter(([,v]) => v != null).map(([k, v]) => `${k}: ${v}`).join(', ');
+        detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">Sample: ${_esc(sampleStr)}</div>`;
+      }
+      if (s.raw_resource) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw resource</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_resource, null, 2))}</pre></details>`;
+      }
+    }
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+async function runFalconDryRun() {
+  const btn = $('falconDryRunBtn');
+  const el = $('falconDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample vulnerabilities from Falcon Spotlight (no database writes)…</div>';
+  try {
+    const res = await api('/api/falcon/dry-run', { method: 'POST' });
+    el.innerHTML = _renderFalconDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderFalconDryRun(res) {
+  if (!res.ok) {
+    let html = `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+    if (res.traceback) {
+      html += `<details><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap">${_esc(res.traceback)}</pre></details>`;
+    }
+    return html;
+  }
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.mapped}</strong> mapped of <strong>${res.fetched}</strong> fetched</span>
+    <span style="color:var(--muted)">Total in Falcon: ${res.total_in_falcon != null ? res.total_in_falcon : '?'}</span>
+  </div>`;
+
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Mapping errors (' + res.errors.length + ')</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">Resource ${_esc(e.resource_id || '?')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Hostname</th><th style="padding:4px 8px">OS</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.vuln?.canonical_id || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset?.name || '')}</td>
+        <td style="padding:4px 8px;color:var(--muted)">${_esc(r.asset?.os || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  if (res.raw_sample) {
+    html += `<details style="margin-top:8px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw API response (first record)</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:300px;overflow:auto">${_esc(JSON.stringify(res.raw_sample, null, 2))}</pre></details>`;
+  }
+  return html;
+}
+
+async function loadFalconTemplates() {
+  const el = $('falconTemplates');
+  if (!el) return;
+  try {
+    const res = await api('/api/falcon/query-templates');
+    el.innerHTML = (res.templates || []).map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadFalconTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._falconTemplateData = res.templates;
+  } catch (e) {
+    el.innerHTML = `<span style="font-size:11px;color:var(--muted)">Could not load templates</span>`;
+  }
+}
+
+function _loadFalconTemplate(name) {
+  const tpl = (window._falconTemplateData || []).find(t => t.name === name);
+  if (!tpl) return;
+  $('falconQueryFilter').value = tpl.filter || '';
+  $('falconQueryLimit').value = tpl.limit || 5;
+}
+
+async function runFalconQuery() {
+  const filter = $('falconQueryFilter').value.trim();
+  if (!filter) { toast('Enter an FQL filter', true); return; }
+  const limit = parseInt($('falconQueryLimit').value) || 5;
+  $('falconQueryBtn').disabled = true;
+  $('falconQueryBtn').textContent = 'Running…';
+  $('falconQueryStatus').textContent = '';
+  $('falconQueryResult').style.display = 'none';
+  try {
+    const t0 = Date.now();
+    const res = await api('/api/falcon/query', { method: 'POST', body: JSON.stringify({ filter, limit }) });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (!res.ok) {
+      $('falconQueryResult').textContent = JSON.stringify(res.error || res, null, 2);
+      $('falconQueryResult').style.display = 'block';
+      $('falconQueryStatus').textContent = `Error — ${elapsed}s`;
+      $('falconExportJSON').disabled = true;
+      $('falconCopyResult').disabled = true;
+    } else {
+      _falconLastResult = res;
+      const meta = res.meta || {};
+      const total = (meta.pagination || {}).total;
+      $('falconQueryResult').textContent = JSON.stringify(res.resources || res, null, 2);
+      $('falconQueryResult').style.display = 'block';
+      $('falconQueryStatus').textContent = `${(res.resources || []).length} returned${total != null ? ` of ${total} total` : ''} — ${elapsed}s`;
+      $('falconExportJSON').disabled = false;
+      $('falconCopyResult').disabled = false;
+    }
+  } catch (e) {
+    $('falconQueryResult').textContent = e.message || String(e);
+    $('falconQueryResult').style.display = 'block';
+    $('falconQueryStatus').textContent = 'Query failed';
+    $('falconExportJSON').disabled = true;
+    $('falconCopyResult').disabled = true;
+  }
+  $('falconQueryBtn').disabled = false;
+  $('falconQueryBtn').textContent = 'Run Query';
+}
+
+function falconExportJSON() {
+  if (!_falconLastResult) return;
+  const blob = new Blob([JSON.stringify(_falconLastResult, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'falcon-query-result.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function falconCopyResult() {
+  const text = $('falconQueryResult').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard'));
+}
+
+$('falconTestSuiteBtn').onclick = runFalconTestSuite;
+$('falconDryRunBtn').onclick = runFalconDryRun;
+$('falconQueryBtn').onclick = runFalconQuery;
+$('falconExportJSON').onclick = falconExportJSON;
+$('falconCopyResult').onclick = falconCopyResult;
+
+$('falconQueryFilter').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runFalconQuery(); }
+});
+
+loadFalconTemplates();
+
+
 boot().catch((e) => {
   document.body.innerHTML = `<div class="empty" style="padding-top:120px">
     <b>RiskDesk could not start.</b>${esc(e.message)}</div>`;

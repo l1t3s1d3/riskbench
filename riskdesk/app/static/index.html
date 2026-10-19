@@ -236,6 +236,52 @@
     </div>
 
     <div class="toolbar">
+      <div class="toolbar-left"><span class="count">CrowdStrike Falcon Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="falconDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="falconTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="falconDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, OAuth authentication,
+        Spotlight scope, data probes, severity breakdown, and sample mapping.
+        The dry run fetches records without writing to the database.
+      </div>
+      <div id="falconTestSuiteResult" style="display:none"></div>
+      <div id="falconDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">FQL query templates</span></div>
+      </div>
+      <div id="falconTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Falcon FQL Query Explorer</span></div>
+      <div class="toolbar-right">
+        <button id="falconQueryBtn" class="btn">Run Query</button>
+      </div>
+    </div>
+    <div id="falconQueryBuilder" style="padding:0 18px 12px;margin-bottom:24px">
+      <div style="display:flex;gap:12px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">FQL Filter</label>
+          <input id="falconQueryFilter" class="field mono" style="font-size:13px" placeholder="status:!'closed'" value="status:!'closed'">
+        </div>
+        <div style="width:160px">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">Limit</label>
+          <input id="falconQueryLimit" class="field mono" type="number" style="font-size:13px" value="5" min="1" max="100">
+        </div>
+      </div>
+      <div id="falconQueryStatus" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="falconExportJSON" class="btn-ghost" style="font-size:12px" disabled>Export JSON</button>
+        <button id="falconCopyResult" class="btn-ghost" style="font-size:12px" disabled>Copy to Clipboard</button>
+      </div>
+      <pre id="falconQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
+    </div>
+
+    <div class="toolbar">
       <div class="toolbar-left"><span class="count">GitHub Advanced Security Diagnostics</span></div>
       <div class="toolbar-right">
         <button id="ghDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
@@ -250,6 +296,10 @@
       </div>
       <div id="ghTestSuiteResult" style="display:none"></div>
       <div id="ghDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">API call templates</span></div>
+      </div>
+      <div id="ghTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
     </div>
 
     <div class="toolbar">

@@ -344,3 +344,58 @@ def test_github_query_requires_path(client):
     assert r.status_code == 200
     data = r.json()
     assert data["ok"] is False
+
+
+def test_github_query_templates(client):
+    """Query templates endpoint returns a list of pre-built API call templates."""
+    r = client.get("/api/github/query-templates")
+    assert r.status_code == 200
+    data = r.json()
+    assert "templates" in data
+    assert len(data["templates"]) >= 5
+    names = [t["name"] for t in data["templates"]]
+    assert "dependabot_open" in names
+    assert "secret_scanning_open" in names
+    assert "rate_limit" in names
+    for t in data["templates"]:
+        assert "path" in t
+        assert "label" in t
+        assert "params" in t
+
+
+# --- 11. CrowdStrike Falcon diagnostics ----------------------------------------
+
+def test_falcon_test_suite_unconfigured(client):
+    """Test suite reports config failure when Falcon env vars are missing."""
+    r = client.post("/api/falcon/test-suite")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["failed"] >= 1
+    assert data["steps"][0]["step"] == "config"
+    assert data["steps"][0]["status"] == "fail"
+    assert data["skipped"] > 0
+
+
+def test_falcon_dry_run_unconfigured(client):
+    """Dry run gracefully reports when Falcon is not configured."""
+    r = client.post("/api/falcon/dry-run")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "not configured" in data["error"].lower()
+
+
+def test_falcon_query_templates(client):
+    """Query templates endpoint returns a list of pre-built FQL templates."""
+    r = client.get("/api/falcon/query-templates")
+    assert r.status_code == 200
+    data = r.json()
+    assert "templates" in data
+    assert len(data["templates"]) >= 5
+    names = [t["name"] for t in data["templates"]]
+    assert "all_open" in names
+    assert "critical_open" in names
+    assert "configured_filter" in names
+    for t in data["templates"]:
+        assert "filter" in t
+        assert "label" in t
