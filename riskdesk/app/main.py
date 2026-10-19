@@ -22,7 +22,7 @@ from . import connector_config as cc_service  # noqa: E402
 from .auth import cleanup_expired_sessions, seed_default_users  # noqa: E402
 from .db import get_session, init_db  # noqa: E402
 from .routes import (  # noqa: E402
-    adjudications, admin, auth, compliance, exceptions, findings, sync, tickets,
+    adjudications, admin, auth, compliance, exceptions, findings, github, sync, tickets,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -72,6 +72,7 @@ app.include_router(exceptions.router)
 app.include_router(compliance.router)
 app.include_router(tickets.router)
 app.include_router(admin.router)
+app.include_router(github.router)
 
 
 # --- static UI --------------------------------------------------------------

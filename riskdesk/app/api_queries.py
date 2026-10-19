@@ -213,4 +213,72 @@ QUERY_REGISTRY = [
         "default_filter": FALCON_DEFAULT_FQL,
         "description": "Combined endpoint with host, CVE, and remediation facets.",
     },
+    # --- GitHub Advanced Security ---
+    {
+        "source": "github",
+        "name": "dependabot_alerts",
+        "label": "Dependabot Alerts",
+        "type": "rest",
+        "endpoint": "/orgs/{org}/dependabot/alerts",
+        "default_params": {"state": "open", "per_page": 100},
+        "description": "SCA vulnerability alerts from Dependabot.",
+    },
+    {
+        "source": "github",
+        "name": "code_scanning_alerts",
+        "label": "Code Scanning Alerts",
+        "type": "rest",
+        "endpoint": "/orgs/{org}/code-scanning/alerts",
+        "default_params": {"state": "open", "per_page": 100},
+        "description": "SAST alerts from CodeQL and third-party tools.",
+    },
+    {
+        "source": "github",
+        "name": "secret_scanning_alerts",
+        "label": "Secret Scanning Alerts",
+        "type": "rest",
+        "endpoint": "/orgs/{org}/secret-scanning/alerts",
+        "default_params": {"state": "open", "per_page": 100},
+        "description": "Exposed credentials detected by GitHub secret scanning.",
+    },
+    {
+        "source": "github",
+        "name": "security_advisories",
+        "label": "Repository Advisories",
+        "type": "rest",
+        "endpoint": "/orgs/{org}/security-advisories",
+        "default_params": {"per_page": 100},
+        "description": "Private security advisories drafted in the org.",
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+#  GITHUB  —  REST endpoints and query parameters
+# ---------------------------------------------------------------------------
+
+GITHUB_ALERT_FAMILIES = [
+    {
+        "name": "dependabot",
+        "label": "Dependabot",
+        "org_path": "/orgs/{org}/dependabot/alerts",
+        "repo_path": "/repos/{owner}/{repo}/dependabot/alerts",
+        "scopes": "Repository permissions -> Dependabot alerts: read",
+    },
+    {
+        "name": "code_scanning",
+        "label": "Code Scanning",
+        "org_path": "/orgs/{org}/code-scanning/alerts",
+        "repo_path": "/repos/{owner}/{repo}/code-scanning/alerts",
+        "scopes": "Repository permissions -> Code scanning alerts: read",
+    },
+    {
+        "name": "secret_scanning",
+        "label": "Secret Scanning",
+        "org_path": "/orgs/{org}/secret-scanning/alerts",
+        "repo_path": "/repos/{owner}/{repo}/secret-scanning/alerts",
+        "scopes": "Repository permissions -> Secret scanning alerts: read",
+    },
+]
+
+GITHUB_SECURITY_STATES = ["open", "fixed", "dismissed", "auto_dismissed"]

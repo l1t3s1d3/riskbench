@@ -2817,6 +2817,338 @@ async function _submitTicket(findingIds) {
   };
 })();
 
+// ---------------------------------------------------------------- GitHub Advanced Security diagnostics
+
+let _ghLastResult = null;
+
+async function runGhTestSuite() {
+  const btn = $('ghTestSuiteBtn');
+  const el = $('ghTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — checking config, auth, org access, alert family probes, repos, and sample mapping…</div>';
+  try {
+    const res = await api('/api/github/test-suite', { method: 'POST' });
+    el.innerHTML = _renderGhTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderGhTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) extras.push(`Org: ${s.config.org}, API: ${s.config.api_url}`);
+      if (s.user) extras.push(`User: ${s.user}`);
+      if (s.token_type) extras.push(`Token: ${s.token_type}`);
+      if (s.scopes) extras.push(`Scopes: ${s.scopes}`);
+      if (s.rate_limit) extras.push(`Rate limit remaining: ${s.rate_limit}`);
+      if (s.org_name) extras.push(`Org: ${s.org_display || s.org_name}`);
+      if (s.plan) extras.push(`Plan: ${s.plan}`);
+      if (s.ghas_enabled != null) extras.push(`GHAS for new repos: ${s.ghas_enabled}`);
+      if (s.alerts_in_page != null) extras.push(`Alerts in page: ${s.alerts_in_page}`);
+      if (s.note) extras.push(s.note);
+      if (s.total_fetched != null) extras.push(`Repos fetched: ${s.total_fetched}`);
+      if (s.sample) extras.push(`Sample: ${JSON.stringify(s.sample).substring(0, 150)}`);
+      if (s.family) extras.push(`Family: ${s.family}`);
+      if (s.mapped) extras.push(`Mapped: ${s.mapped.canonical_id} → ${s.mapped.severity}`);
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+      if (s.repos && s.repos.length) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">${s.repos.length} repos</summary>`;
+        detail += '<div style="font-size:11px;color:var(--muted)">';
+        for (const r of s.repos.slice(0, 10)) {
+          detail += `<div>${_esc(r.name)} — GHAS: ${r.advanced_security || '?'}, secrets: ${r.secret_scanning || '?'}, push protection: ${r.secret_scanning_push_protection || '?'}</div>`;
+        }
+        if (s.repos.length > 10) detail += `<div>… and ${s.repos.length - 10} more</div>`;
+        detail += '</div></details>';
+      }
+      if (s.raw_alert) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw alert</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_alert, null, 2))}</pre></details>`;
+      }
+    }
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+async function runGhDryRun() {
+  const btn = $('ghDryRunBtn');
+  const el = $('ghDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample alerts from GitHub (no database writes)…</div>';
+  try {
+    const res = await api('/api/github/dry-run', { method: 'POST' });
+    el.innerHTML = _renderGhDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderGhDryRun(res) {
+  if (!res.ok) {
+    return `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+  }
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.total}</strong> fetched &amp; mapped</span>
+  </div>`;
+
+  if (res.by_family && Object.keys(res.by_family).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:8px">';
+    for (const [fam, count] of Object.entries(res.by_family)) {
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:var(--panel);border:1px solid var(--border)">${_esc(fam)}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Errors (' + res.errors.length + ')</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">${_esc(e.family || '')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Family</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Asset</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.canonical_id || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.family || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+async function loadGhOverview() {
+  const btn = $('ghOverviewBtn');
+  const el = $('ghOverviewResult');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching security overview…</div>';
+  try {
+    const res = await api('/api/github/security-overview');
+    el.innerHTML = _renderGhOverview(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Load Overview';
+}
+
+function _renderGhOverview(res) {
+  if (!res.ok) {
+    return `<div style="color:var(--danger);font-size:13px">${_esc(res.error)}</div>`;
+  }
+  let html = `<div style="font-size:13px;margin-bottom:12px"><strong>Organization:</strong> ${_esc(res.org)}</div>`;
+
+  if (res.families) {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">';
+    const labels = { dependabot: 'Dependabot', code_scanning: 'Code Scanning', secret_scanning: 'Secret Scanning' };
+    for (const [fam, states] of Object.entries(res.families)) {
+      const openInfo = states.open || {};
+      const fixedInfo = states.fixed || {};
+      const openCount = openInfo.error ? openInfo.error : (openInfo.count || 0) + (openInfo.has_more ? '+' : '');
+      const fixedCount = fixedInfo.error ? fixedInfo.error : (fixedInfo.count || 0) + (fixedInfo.has_more ? '+' : '');
+      html += `<div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">${_esc(labels[fam] || fam)}</div>
+        <div style="font-size:12px">Open: <strong>${openCount}</strong></div>
+        <div style="font-size:12px;color:var(--muted)">Fixed: ${fixedCount}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.dependabot_by_severity) {
+    html += '<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:600;margin-bottom:6px">Dependabot by severity (open)</div>';
+    html += '<div style="display:flex;gap:8px">';
+    for (const [sev, count] of Object.entries(res.dependabot_by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div></div>';
+  }
+
+  if (res.top_repos && res.top_repos.length) {
+    html += '<div style="font-size:12px;font-weight:600;margin-bottom:6px">Top repos by alert count</div>';
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">Repository</th><th style="padding:4px 8px">Dependabot</th><th style="padding:4px 8px">Code Scanning</th><th style="padding:4px 8px">Secret Scanning</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.top_repos) {
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.repo)}</td>
+        <td style="padding:4px 8px">${r.dependabot}</td>
+        <td style="padding:4px 8px">${r.code_scanning}</td>
+        <td style="padding:4px 8px">${r.secret_scanning}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+async function loadGhRepos() {
+  const btn = $('ghReposBtn');
+  const el = $('ghReposResult');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching repos…</div>';
+  try {
+    const res = await api('/api/github/repos');
+    el.innerHTML = _renderGhRepos(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Load Repos';
+}
+
+function _renderGhRepos(res) {
+  if (!res.repos || !res.repos.length) {
+    return '<div class="hint">No repos found.</div>';
+  }
+  let html = `<div style="font-size:12px;margin-bottom:8px"><strong>${res.total}</strong> repos in <strong>${_esc(res.org)}</strong></div>`;
+  html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+  html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+  html += '<th style="padding:4px 8px">Repository</th><th style="padding:4px 8px">Language</th><th style="padding:4px 8px">GHAS</th><th style="padding:4px 8px">Secret Scan</th><th style="padding:4px 8px">Push Protect</th><th style="padding:4px 8px">Dependabot</th><th style="padding:4px 8px">Last Push</th>';
+  html += '</tr></thead><tbody>';
+  for (const r of res.repos) {
+    const ghasColor = r.advanced_security === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const secretColor = r.secret_scanning === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const pushColor = r.push_protection === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const depColor = r.dependabot_updates === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    html += `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:4px 8px;font-family:monospace">${r.html_url ? `<a href="${_esc(r.html_url)}" target="_blank" rel="noopener">${_esc(r.full_name)}</a>` : _esc(r.full_name)}${r.archived ? ' <span style="color:var(--muted)">(archived)</span>' : ''}</td>
+      <td style="padding:4px 8px">${_esc(r.language || '—')}</td>
+      <td style="padding:4px 8px;color:${ghasColor}">${_esc(r.advanced_security || '—')}</td>
+      <td style="padding:4px 8px;color:${secretColor}">${_esc(r.secret_scanning || '—')}</td>
+      <td style="padding:4px 8px;color:${pushColor}">${_esc(r.push_protection || '—')}</td>
+      <td style="padding:4px 8px;color:${depColor}">${_esc(r.dependabot_updates || '—')}</td>
+      <td style="padding:4px 8px;color:var(--muted)">${r.pushed_at ? fmtDate(r.pushed_at) : '—'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  return html;
+}
+
+async function runGhQuery() {
+  const path = $('ghQueryPath').value.trim();
+  if (!path) { toast('Enter an API path', true); return; }
+  let params = {};
+  const paramsText = $('ghQueryParams').value.trim();
+  if (paramsText) {
+    try { params = JSON.parse(paramsText); }
+    catch (e) { toast('Params must be valid JSON', true); return; }
+  }
+  $('ghQueryBtn').disabled = true;
+  $('ghQueryBtn').textContent = 'Running…';
+  $('ghQueryStatus').textContent = '';
+  $('ghQueryResult').style.display = 'none';
+  try {
+    const t0 = Date.now();
+    const res = await api('/api/github/query', { method: 'POST', body: JSON.stringify({ method: 'GET', path, params }) });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (!res.ok) {
+      $('ghQueryResult').textContent = JSON.stringify(res.data || res.error, null, 2);
+      $('ghQueryResult').style.display = 'block';
+      $('ghQueryStatus').textContent = `HTTP ${res.status_code} — ${elapsed}s`;
+      $('ghExportJSON').disabled = true;
+      $('ghCopyResult').disabled = true;
+    } else {
+      _ghLastResult = res.data;
+      $('ghQueryResult').textContent = JSON.stringify(res.data, null, 2);
+      $('ghQueryResult').style.display = 'block';
+      $('ghQueryStatus').textContent = `HTTP ${res.status_code} — ${elapsed}s — Rate limit: ${res.headers?.['x-ratelimit-remaining'] || '?'}`;
+      $('ghExportJSON').disabled = false;
+      $('ghCopyResult').disabled = false;
+    }
+  } catch (e) {
+    $('ghQueryResult').textContent = e.message || String(e);
+    $('ghQueryResult').style.display = 'block';
+    $('ghQueryStatus').textContent = 'Query failed';
+    $('ghExportJSON').disabled = true;
+    $('ghCopyResult').disabled = true;
+  }
+  $('ghQueryBtn').disabled = false;
+  $('ghQueryBtn').textContent = 'Run Query';
+}
+
+function ghExportJSON() {
+  if (!_ghLastResult) return;
+  const blob = new Blob([JSON.stringify(_ghLastResult, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'github-query-result.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function ghCopyResult() {
+  const text = $('ghQueryResult').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard'));
+}
+
+$('ghTestSuiteBtn').onclick = runGhTestSuite;
+$('ghDryRunBtn').onclick = runGhDryRun;
+$('ghOverviewBtn').onclick = loadGhOverview;
+$('ghReposBtn').onclick = loadGhRepos;
+$('ghQueryBtn').onclick = runGhQuery;
+$('ghExportJSON').onclick = ghExportJSON;
+$('ghCopyResult').onclick = ghCopyResult;
+
+$('ghQueryPath').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runGhQuery(); }
+});
+
 boot().catch((e) => {
   document.body.innerHTML = `<div class="empty" style="padding-top:120px">
     <b>RiskDesk could not start.</b>${esc(e.message)}</div>`;

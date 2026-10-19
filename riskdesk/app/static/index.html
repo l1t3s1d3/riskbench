@@ -236,6 +236,71 @@
     </div>
 
     <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Advanced Security Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="ghDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="ghTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="ghDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, token auth, org access,
+        Dependabot / Code Scanning / Secret Scanning alert probes, repo listing,
+        and sample alert mapping. The dry run fetches records without writing to the database.
+      </div>
+      <div id="ghTestSuiteResult" style="display:none"></div>
+      <div id="ghDryRunResult" style="display:none"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Security Overview</span></div>
+      <div class="toolbar-right">
+        <button id="ghOverviewBtn" class="btn-ghost">Load Overview</button>
+      </div>
+    </div>
+    <div id="ghOverview" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:8px">
+        Org-wide GHAS coverage: alert counts by family, severity breakdown, and top repos.
+      </div>
+      <div id="ghOverviewResult" style="display:none"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Repos &amp; GHAS Enablement</span></div>
+      <div class="toolbar-right">
+        <button id="ghReposBtn" class="btn-ghost">Load Repos</button>
+      </div>
+    </div>
+    <div id="ghRepos" style="padding:0 18px 12px">
+      <div id="ghReposResult" style="display:none"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub API Explorer</span></div>
+      <div class="toolbar-right">
+        <button id="ghQueryBtn" class="btn">Run Query</button>
+      </div>
+    </div>
+    <div id="ghQueryBuilder" style="padding:0 18px 12px;margin-bottom:24px">
+      <div style="display:flex;gap:12px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">API Path</label>
+          <input id="ghQueryPath" class="field mono" style="font-size:13px" placeholder="/orgs/{org}/dependabot/alerts" value="/orgs/{org}/dependabot/alerts">
+        </div>
+        <div style="width:280px">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">Query Parameters (JSON)</label>
+          <textarea id="ghQueryParams" class="field" rows="3" style="font-family:monospace;font-size:13px;resize:vertical" placeholder='{"per_page": 5, "state": "open"}'></textarea>
+        </div>
+      </div>
+      <div id="ghQueryStatus" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="ghExportJSON" class="btn-ghost" style="font-size:12px" disabled>Export JSON</button>
+        <button id="ghCopyResult" class="btn-ghost" style="font-size:12px" disabled>Copy to Clipboard</button>
+      </div>
+      <pre id="ghQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
+    </div>
+
+    <div class="toolbar">
       <div class="toolbar-left"><span class="count">Wiz Connection Diagnostics</span></div>
       <div class="toolbar-right">
         <button id="wizDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>

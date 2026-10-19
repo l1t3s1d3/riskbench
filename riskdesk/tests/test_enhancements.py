@@ -280,3 +280,67 @@ def test_wiz_dry_run_unconfigured(client):
     data = r.json()
     assert data["ok"] is False
     assert "not configured" in data["error"].lower()
+
+
+# --- 10. GitHub Advanced Security diagnostics --------------------------------
+
+def test_github_test_suite_unconfigured(client):
+    """Test suite reports config failure when GitHub env vars are missing."""
+    r = client.post("/api/github/test-suite")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["failed"] >= 1
+    assert data["steps"][0]["step"] == "config"
+    assert data["steps"][0]["status"] == "fail"
+    assert data["skipped"] > 0
+
+
+def test_github_dry_run_unconfigured(client):
+    """Dry run gracefully reports when GitHub is not configured."""
+    r = client.post("/api/github/dry-run")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "not configured" in data["error"].lower()
+
+
+def test_github_security_overview_unconfigured(client):
+    """Security overview gracefully reports when GitHub is not configured."""
+    r = client.get("/api/github/security-overview")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "not configured" in data["error"].lower()
+
+
+def test_github_repos_unconfigured(client):
+    """Repos endpoint returns 400 when GitHub is not configured."""
+    r = client.get("/api/github/repos")
+    assert r.status_code == 400
+
+
+def test_github_query_unconfigured(client):
+    """API explorer returns not-configured when GitHub is not set up."""
+    r = client.post("/api/github/query", json={"path": "/orgs/test/dependabot/alerts"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "not configured" in data["error"].lower()
+
+
+def test_github_query_rejects_post_method(client):
+    """API explorer rejects non-GET/HEAD methods for safety.
+    When unconfigured, the not-configured check fires first."""
+    r = client.post("/api/github/query", json={"method": "POST", "path": "/something"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+
+
+def test_github_query_requires_path(client):
+    """API explorer requires a path parameter.
+    When unconfigured, the not-configured check fires first."""
+    r = client.post("/api/github/query", json={"method": "GET", "path": ""})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
