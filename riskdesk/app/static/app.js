@@ -2365,7 +2365,8 @@ async function loadTickets() {
 
 function ticketRowHtml(t) {
   const statusCls = t.status === 'resolved' || t.status === 'closed' ? 'sev-low'
-    : t.status === 'in_progress' ? 'sev-medium' : 'sev-high';
+    : t.status === 'in_progress' ? 'sev-medium'
+    : t.status === "won't_fix" ? 'sev-info' : 'sev-high';
   return `<div class="row" data-id="${t.id}" style="cursor:pointer">
     <div class="row-main">
       <div class="row-id mono" style="min-width:120px">
@@ -2428,8 +2429,12 @@ async function openTicketDetail(id) {
 
 async function syncTicket(id) {
   try {
-    const r = await api(`/api/tickets/${id}/sync`, { method: 'POST' });
-    if (r.ok) { toast('Synced from Jira'); openTicketDetail(id); }
+    const res = await fetch(`/api/tickets/${id}/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-RiskDesk-User': currentUser() },
+    });
+    const r = await res.json();
+    if (res.ok && r.ok !== false) { toast('Synced from Jira'); openTicketDetail(id); }
     else toast(r.error || 'Sync failed', true);
   } catch (e) { toast(e.message, true); }
 }
@@ -2466,6 +2471,7 @@ async function loadFindingTickets(findingId) {
 }
 
 function openCreateTicket(findingIds) {
+  $('detail').hidden = true;
   const el = $('decide');
   openDrawer(el);
   el.innerHTML = `
@@ -2537,9 +2543,14 @@ async function _submitTicket(findingIds) {
     payload.external_url = $('ticketExtUrl').value || undefined;
   }
   try {
-    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify(payload) });
-    if (r.ok === false) {
-      $('createTicketError').textContent = r.error;
+    const res = await fetch('/api/tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-RiskDesk-User': currentUser() },
+      body: JSON.stringify(payload),
+    });
+    const r = await res.json();
+    if (!res.ok || r.ok === false) {
+      $('createTicketError').textContent = r.error || r.detail || `Error ${res.status}`;
       $('createTicketError').hidden = false;
       return;
     }

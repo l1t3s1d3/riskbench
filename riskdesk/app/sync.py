@@ -248,9 +248,13 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     return row.id, is_new
 
 
-def run_sync_from_records(db, source: str, records: list[NormalizedRecord],
+def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord],
                           actor: str = "system") -> dict:
-    """Import pre-mapped NormalizedRecords (e.g. from a file upload)."""
+    """Import pre-mapped NormalizedRecords (e.g. from a file upload).
+
+    Uses its own DB session to avoid corrupting the caller's session on error.
+    """
+    db = SessionLocal()
     run = SyncRun(source=source, triggered_by=actor, status="running")
     db.add(run)
     db.commit()
@@ -295,11 +299,13 @@ def run_sync_from_records(db, source: str, records: list[NormalizedRecord],
         ))
         db.commit()
 
-    return {
-        "run_id": run.id, "source": source, "status": run.status,
-        "error": run.error, **stats,
-        "new_by_severity": new_severity,
-    }
+        result = {
+            "run_id": run.id, "source": source, "status": run.status,
+            "error": run.error, **stats,
+            "new_by_severity": new_severity,
+        }
+        db.close()
+    return result
 
 
 def _mark_stale(db, source: str, run_started: dt.datetime) -> int:

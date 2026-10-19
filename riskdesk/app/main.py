@@ -1597,6 +1597,13 @@ def list_tickets(
     return result
 
 
+@app.get("/api/tickets/for-finding/{finding_id}")
+def tickets_for_finding(finding_id: int, db=Depends(get_session)):
+    """Find all tickets that cover a specific finding."""
+    rows = db.execute(select(Ticket).order_by(Ticket.created_at.desc())).scalars().all()
+    return [_serialize_ticket(t) for t in rows if finding_id in (t.finding_ids or [])]
+
+
 @app.get("/api/tickets/{ticket_id}")
 def get_ticket(ticket_id: int, db=Depends(get_session)):
     t = db.get(Ticket, ticket_id)
@@ -1693,7 +1700,6 @@ def update_ticket(ticket_id: int, request: Request, body: dict = Body(...),
             setattr(t, field, body[field])
     if body.get("status") in ("resolved", "closed"):
         t.resolved_at = dt.datetime.now(dt.timezone.utc)
-    t.synced_at = dt.datetime.now(dt.timezone.utc)
     db.add(AuditEvent(
         actor=actor, action="ticket.update",
         entity_type="ticket", entity_id=t.external_id,
@@ -1730,13 +1736,6 @@ def sync_ticket_status(ticket_id: int, request: Request, db=Depends(get_session)
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
 
 
-@app.get("/api/tickets/for-finding/{finding_id}")
-def tickets_for_finding(finding_id: int, db=Depends(get_session)):
-    """Find all tickets that cover a specific finding."""
-    rows = db.execute(select(Ticket).order_by(Ticket.created_at.desc())).scalars().all()
-    return [_serialize_ticket(t) for t in rows if finding_id in (t.finding_ids or [])]
-
-
 def _create_jira_issue(config: dict, summary: str, description: str, *,
                        project_key: str, issue_type: str,
                        priority: str | None = None,
@@ -1769,7 +1768,9 @@ def _create_jira_issue(config: dict, summary: str, description: str, *,
 
 
 def _fetch_jira_issue(config: dict, issue_key: str) -> dict:
-    import httpx, base64
+    import re, httpx, base64
+    if not re.match(r'^[A-Z][A-Z0-9_]+-\d+$', issue_key):
+        raise ValueError(f"Invalid Jira issue key: {issue_key!r}")
     auth = base64.b64encode(f"{config['email']}:{config['api_token']}".encode()).decode()
     url = config["url"].rstrip("/")
     r = httpx.get(
@@ -1830,18 +1831,18 @@ def wiz_import_file(request: Request, body: dict = Body(...), db=Depends(get_ses
     reload_settings()
     actor = current_user(request)
 
-    nodes = []
+    vuln_nodes = []
+    config_nodes = []
     if "findings" in body:
-        nodes = body["findings"]
+        vuln_nodes = body["findings"]
     elif "data" in body:
         data = body["data"]
-        for key in ("vulnerabilityFindings", "configurationFindings"):
-            block = data.get(key, {})
-            nodes.extend(block.get("nodes", []))
+        vuln_nodes = (data.get("vulnerabilityFindings") or {}).get("nodes", [])
+        config_nodes = (data.get("configurationFindings") or {}).get("nodes", [])
     else:
-        nodes = body.get("nodes", [])
+        vuln_nodes = body.get("nodes", [])
 
-    if not nodes:
+    if not vuln_nodes and not config_nodes:
         raise HTTPException(422, "No findings found in the uploaded data. "
                             "Expected 'findings', 'data.vulnerabilityFindings.nodes', or 'nodes' key.")
 
@@ -1851,18 +1852,25 @@ def wiz_import_file(request: Request, body: dict = Body(...), db=Depends(get_ses
 
     records = []
     errors = []
-    for i, node in enumerate(nodes):
+    for i, node in enumerate(vuln_nodes):
         try:
             rec = wiz._map_vuln(node)
             if rec:
                 records.append(rec)
         except Exception as exc:
-            errors.append({"index": i, "id": node.get("id"), "error": str(exc)})
+            errors.append({"index": i, "id": node.get("id"), "error": str(exc), "type": "vuln"})
+    for i, node in enumerate(config_nodes):
+        try:
+            rec = wiz._map_config(node)
+            if rec:
+                records.append(rec)
+        except Exception as exc:
+            errors.append({"index": i, "id": node.get("id"), "error": str(exc), "type": "config"})
 
     if not records:
         return JSONResponse({
             "ok": False,
-            "error": f"Could not map any of {len(nodes)} nodes to findings",
+            "error": f"Could not map any of {len(vuln_nodes) + len(config_nodes)} nodes to findings",
             "mapping_errors": errors[:20],
         }, status_code=422)
 
