@@ -20,6 +20,18 @@ from .models import ConnectorConfig, utcnow
 
 # Field definitions per source, with which fields are sensitive
 SOURCE_FIELDS = {
+    "jira": {
+        "fields": [
+            {"key": "url", "label": "Jira URL", "sensitive": False, "required": True,
+             "placeholder": "https://yourorg.atlassian.net"},
+            {"key": "email", "label": "Email", "sensitive": False, "required": True,
+             "placeholder": "user@example.com"},
+            {"key": "api_token", "label": "API Token", "sensitive": True, "required": True},
+            {"key": "project_key", "label": "Default Project Key", "sensitive": False, "required": True,
+             "placeholder": "VULN"},
+            {"key": "issue_type", "label": "Default Issue Type", "sensitive": False, "default": "Bug"},
+        ],
+    },
     "wiz": {
         "fields": [
             {"key": "client_id", "label": "Client ID", "sensitive": False, "required": True},
@@ -59,6 +71,11 @@ SOURCE_FIELDS = {
 
 # Map from DB config keys to environment variable names
 ENV_MAP = {
+    "jira": {
+        "url": "JIRA_URL", "email": "JIRA_EMAIL",
+        "api_token": "JIRA_API_TOKEN", "project_key": "JIRA_PROJECT_KEY",
+        "issue_type": "JIRA_ISSUE_TYPE",
+    },
     "wiz": {
         "client_id": "WIZ_CLIENT_ID", "client_secret": "WIZ_CLIENT_SECRET",
         "api_url": "WIZ_API_URL", "auth_url": "WIZ_AUTH_URL",
@@ -154,7 +171,7 @@ def apply_to_env(source: str, config: dict):
 
 def apply_all_from_db(db):
     """On startup, apply any DB-stored configs to the environment."""
-    for source in SOURCE_FIELDS:
+    for source in list(SOURCE_FIELDS.keys()):
         row = db.execute(
             select(ConnectorConfig).where(ConnectorConfig.source == source)
         ).scalar_one_or_none()

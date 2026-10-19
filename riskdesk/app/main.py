@@ -39,7 +39,8 @@ from .models import (  # noqa: E402
     Adjudication, AdjudicationApplication, ApiToken, Asset, AssetCorrelation,
     AssignmentRule, AuditEvent, ComplianceBenchmark, ComplianceCheck,
     ComplianceScan, ComplianceTarget, ConnectorConfig, ExceptionComment,
-    ExceptionRequest, Finding, SavedView, SyncRun, SyncSchedule, User, Vuln,
+    ExceptionRequest, Finding, SavedView, SyncRun, SyncSchedule, Ticket,
+    User, Vuln,
 )
 from .queries import (  # noqa: E402
     FindingFilter, _serialize_adj, build_pending_map, build_resolution_map,
@@ -528,41 +529,60 @@ def diagnose_wiz(request: Request):
 @app.post("/api/wiz/query")
 async def wiz_query(request: Request):
     """Execute an arbitrary GraphQL query against the connected Wiz tenant."""
+    import traceback
     from .connectors.wiz import WizConnector
-    body = await request.json()
+    from .config import reload_settings
+    reload_settings()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
     query = body.get("query", "").strip()
     variables = body.get("variables") or {}
     if not query:
         raise HTTPException(400, "No query provided")
     c = WizConnector()
     if not c.configured():
-        raise HTTPException(400, "Wiz connector is not configured. Set credentials in Sources → Wiz.")
+        return {"ok": False, "error": "Wiz connector is not configured. Set credentials in Sources → Wiz.",
+                "debug": {"client_id": bool(c.cfg.client_id), "client_secret": bool(c.cfg.client_secret),
+                          "api_url": c.cfg.api_url or "(empty)"}}
     try:
         c._get_token()
     except Exception as exc:
-        raise HTTPException(502, f"Wiz authentication failed: {exc}")
+        return {"ok": False, "error": f"Wiz authentication failed: {exc}",
+                "traceback": traceback.format_exc()}
     try:
         data = c.graphql(query, variables, attempts=2)
     except Exception as exc:
-        raise HTTPException(502, f"Wiz GraphQL error: {exc}")
+        return {"ok": False, "error": f"Wiz GraphQL error: {exc}",
+                "traceback": traceback.format_exc()}
     return {"ok": True, "data": data}
 
 
 @app.post("/api/wiz/introspect")
 async def wiz_introspect_type(request: Request):
     """Introspect a Wiz GraphQL type to discover available fields."""
+    import traceback
     from .connectors.wiz import WizConnector
-    body = await request.json()
+    from .config import reload_settings
+    reload_settings()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON body")
     type_name = body.get("type", "").strip()
     if not type_name:
         raise HTTPException(400, "No type name provided")
     c = WizConnector()
     if not c.configured():
-        raise HTTPException(400, "Wiz connector is not configured.")
+        return {"ok": False, "error": "Wiz connector is not configured.",
+                "debug": {"client_id": bool(c.cfg.client_id), "client_secret": bool(c.cfg.client_secret),
+                          "api_url": c.cfg.api_url or "(empty)"}}
     try:
         fields = c.introspect(type_name)
     except Exception as exc:
-        raise HTTPException(502, f"Introspection failed: {exc}")
+        return {"ok": False, "error": f"Introspection failed: {exc}",
+                "traceback": traceback.format_exc()}
     return {"ok": True, "type": type_name, "fields": fields}
 
 
@@ -1405,7 +1425,7 @@ def revoke_token(token_id: int, request: Request, db=Depends(get_session)):
 def list_source_configs(request: Request, db=Depends(get_session)):
     """Get all source configurations with sensitive fields masked."""
     result = {}
-    for source in ("wiz", "falcon", "github"):
+    for source in ("wiz", "falcon", "github", "jira"):
         result[source] = {
             "config": cc_service.get_config_display(db, source),
             "fields": cc_service.get_field_definitions(source),
@@ -1415,7 +1435,7 @@ def list_source_configs(request: Request, db=Depends(get_session)):
 
 @app.get("/api/config/sources/{source}")
 def get_source_config(source: str, request: Request, db=Depends(get_session)):
-    if source not in ("wiz", "falcon", "github"):
+    if source not in ("wiz", "falcon", "github", "jira"):
         raise HTTPException(400)
     return {
         "config": cc_service.get_config_display(db, source),
@@ -1426,7 +1446,7 @@ def get_source_config(source: str, request: Request, db=Depends(get_session)):
 @app.post("/api/config/sources/{source}")
 def save_source_config(source: str, request: Request, body: dict = Body(...),
                        db=Depends(get_session)):
-    if source not in ("wiz", "falcon", "github"):
+    if source not in ("wiz", "falcon", "github", "jira"):
         raise HTTPException(400)
     actor = current_user(request)
     config = body.get("config", {})
@@ -1532,6 +1552,324 @@ def list_pipeline_containers(request: Request):
 @app.post("/api/pipeline/containers/{service}/{action}")
 def manage_pipeline_container(service: str, action: str, request: Request):
     return pipeline_service.manage_container(action, service)
+
+
+# --- tickets / Jira integration ---------------------------------------------
+
+def _serialize_ticket(t: Ticket) -> dict:
+    return {
+        "id": t.id,
+        "external_id": t.external_id,
+        "external_url": t.external_url,
+        "provider": t.provider,
+        "project_key": t.project_key,
+        "issue_type": t.issue_type,
+        "summary": t.summary,
+        "description": t.description,
+        "status": t.status,
+        "priority": t.priority,
+        "assignee": t.assignee,
+        "reporter": t.reporter,
+        "finding_ids": t.finding_ids or [],
+        "vuln_ids": t.vuln_ids or [],
+        "finding_count": t.finding_count or 0,
+        "severity": t.severity,
+        "created_by": t.created_by,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+        "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+        "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
+        "synced_at": t.synced_at.isoformat() if t.synced_at else None,
+    }
+
+
+@app.get("/api/tickets")
+def list_tickets(
+    status: str | None = None, finding_id: int | None = None,
+    db=Depends(get_session),
+):
+    q = select(Ticket).order_by(Ticket.created_at.desc())
+    if status:
+        q = q.where(Ticket.status == status)
+    rows = db.execute(q).scalars().all()
+    result = [_serialize_ticket(t) for t in rows]
+    if finding_id:
+        result = [t for t in result if finding_id in (t["finding_ids"] or [])]
+    return result
+
+
+@app.get("/api/tickets/{ticket_id}")
+def get_ticket(ticket_id: int, db=Depends(get_session)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    return _serialize_ticket(t)
+
+
+@app.post("/api/tickets")
+def create_ticket(request: Request, body: dict = Body(...), db=Depends(get_session)):
+    """Create a ticket record. If Jira is configured, also creates the Jira issue."""
+    actor = current_user(request)
+    finding_ids = body.get("finding_ids", [])
+    if not finding_ids:
+        raise HTTPException(422, "finding_ids is required")
+
+    findings = db.execute(
+        select(Finding).options(joinedload(Finding.vuln), joinedload(Finding.asset))
+        .where(Finding.id.in_(finding_ids))
+    ).unique().scalars().all()
+    if not findings:
+        raise HTTPException(404, "No matching findings")
+
+    severities = [f.severity for f in findings]
+    sev_order = ["critical", "high", "medium", "low", "info"]
+    highest = min(severities, key=lambda s: sev_order.index(s) if s in sev_order else 99)
+    vuln_ids = list({f.vuln.canonical_id for f in findings if f.vuln})
+
+    summary = body.get("summary") or _auto_summary(findings)
+    description = body.get("description") or _auto_description(findings)
+
+    jira_config = cc_service.get_config(db, "jira")
+    external_id = ""
+    external_url = ""
+    provider = body.get("provider", "jira")
+    project_key = body.get("project_key") or jira_config.get("project_key", "")
+    issue_type = body.get("issue_type") or jira_config.get("issue_type", "Bug")
+
+    if provider == "jira" and jira_config.get("url") and jira_config.get("api_token"):
+        try:
+            jira_result = _create_jira_issue(
+                jira_config, summary, description,
+                project_key=project_key, issue_type=issue_type,
+                priority=body.get("priority"),
+                assignee=body.get("assignee"),
+            )
+            external_id = jira_result["key"]
+            external_url = jira_result["url"]
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": f"Jira API error: {exc}"}, status_code=502)
+    elif provider == "manual":
+        external_id = body.get("external_id", f"MANUAL-{dt.datetime.now().strftime('%Y%m%d%H%M%S')}")
+        external_url = body.get("external_url", "")
+    else:
+        external_id = f"DRAFT-{dt.datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    ticket = Ticket(
+        external_id=external_id,
+        external_url=external_url,
+        provider=provider,
+        project_key=project_key,
+        issue_type=issue_type,
+        summary=summary,
+        description=description,
+        status="open",
+        priority=body.get("priority", _sev_to_priority(highest)),
+        assignee=body.get("assignee"),
+        reporter=actor,
+        finding_ids=finding_ids,
+        vuln_ids=vuln_ids,
+        finding_count=len(findings),
+        severity=highest,
+        created_by=actor,
+    )
+    db.add(ticket)
+    db.add(AuditEvent(
+        actor=actor, action="ticket.create",
+        entity_type="ticket", entity_id=external_id,
+        summary=f"Created ticket {external_id} for {len(findings)} findings",
+    ))
+    db.commit()
+    return _serialize_ticket(ticket)
+
+
+@app.put("/api/tickets/{ticket_id}")
+def update_ticket(ticket_id: int, request: Request, body: dict = Body(...),
+                  db=Depends(get_session)):
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    actor = current_user(request)
+    for field in ("status", "assignee", "priority", "external_id", "external_url"):
+        if field in body:
+            setattr(t, field, body[field])
+    if body.get("status") in ("resolved", "closed"):
+        t.resolved_at = dt.datetime.now(dt.timezone.utc)
+    t.synced_at = dt.datetime.now(dt.timezone.utc)
+    db.add(AuditEvent(
+        actor=actor, action="ticket.update",
+        entity_type="ticket", entity_id=t.external_id,
+        summary=f"Updated ticket {t.external_id}: {', '.join(body.keys())}",
+    ))
+    db.commit()
+    return _serialize_ticket(t)
+
+
+@app.post("/api/tickets/{ticket_id}/sync")
+def sync_ticket_status(ticket_id: int, request: Request, db=Depends(get_session)):
+    """Pull latest status from Jira for this ticket."""
+    t = db.get(Ticket, ticket_id)
+    if not t:
+        raise HTTPException(404)
+    if t.provider != "jira":
+        return {"ok": True, "message": "Only Jira tickets can be synced"}
+    jira_config = cc_service.get_config(db, "jira")
+    if not jira_config.get("url") or not jira_config.get("api_token"):
+        raise HTTPException(422, "Jira not configured")
+    try:
+        issue = _fetch_jira_issue(jira_config, t.external_id)
+        fields = issue.get("fields", {})
+        t.status = (fields.get("status", {}).get("name", "open")).lower().replace(" ", "_")
+        t.assignee = (fields.get("assignee") or {}).get("displayName")
+        t.priority = (fields.get("priority") or {}).get("name")
+        resolution = fields.get("resolution")
+        if resolution and not t.resolved_at:
+            t.resolved_at = dt.datetime.now(dt.timezone.utc)
+        t.synced_at = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        return {"ok": True, "ticket": _serialize_ticket(t)}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+
+@app.get("/api/tickets/for-finding/{finding_id}")
+def tickets_for_finding(finding_id: int, db=Depends(get_session)):
+    """Find all tickets that cover a specific finding."""
+    rows = db.execute(select(Ticket).order_by(Ticket.created_at.desc())).scalars().all()
+    return [_serialize_ticket(t) for t in rows if finding_id in (t.finding_ids or [])]
+
+
+def _create_jira_issue(config: dict, summary: str, description: str, *,
+                       project_key: str, issue_type: str,
+                       priority: str | None = None,
+                       assignee: str | None = None) -> dict:
+    import httpx, base64
+    auth = base64.b64encode(f"{config['email']}:{config['api_token']}".encode()).decode()
+    url = config["url"].rstrip("/")
+    payload: dict = {
+        "fields": {
+            "project": {"key": project_key},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": issue_type},
+        }
+    }
+    if priority:
+        payload["fields"]["priority"] = {"name": priority}
+    if assignee:
+        payload["fields"]["assignee"] = {"accountId": assignee}
+    r = httpx.post(
+        f"{url}/rest/api/2/issue",
+        json=payload,
+        headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"Jira {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    return {"key": data["key"], "url": f"{url}/browse/{data['key']}"}
+
+
+def _fetch_jira_issue(config: dict, issue_key: str) -> dict:
+    import httpx, base64
+    auth = base64.b64encode(f"{config['email']}:{config['api_token']}".encode()).decode()
+    url = config["url"].rstrip("/")
+    r = httpx.get(
+        f"{url}/rest/api/2/issue/{issue_key}",
+        headers={"Authorization": f"Basic {auth}"},
+        timeout=30,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"Jira {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
+def _auto_summary(findings) -> str:
+    vulns = {f.vuln.canonical_id for f in findings if f.vuln}
+    assets = {f.asset.name for f in findings if f.asset}
+    if len(vulns) == 1:
+        v = list(vulns)[0]
+        return f"[{findings[0].severity.upper()}] {v} on {len(assets)} asset(s)"
+    return f"[{findings[0].severity.upper()}] {len(vulns)} vulnerabilities on {len(assets)} asset(s)"
+
+
+def _auto_description(findings) -> str:
+    lines = ["Vulnerability findings from RiskDesk:\n"]
+    by_vuln: dict = {}
+    for f in findings:
+        vid = f.vuln.canonical_id if f.vuln else "unknown"
+        by_vuln.setdefault(vid, []).append(f)
+    for vid, flist in list(by_vuln.items())[:20]:
+        sev = flist[0].severity
+        title = flist[0].vuln.title if flist[0].vuln else vid
+        lines.append(f"* *{vid}* ({sev}) - {title}")
+        for f in flist[:5]:
+            asset = f.asset.name if f.asset else "unknown"
+            comp = f.component or ""
+            lines.append(f"  - {asset} {comp}")
+        if len(flist) > 5:
+            lines.append(f"  - ...and {len(flist) - 5} more")
+    lines.append(f"\nTotal findings: {len(findings)}")
+    return "\n".join(lines)
+
+
+def _sev_to_priority(severity: str) -> str:
+    return {"critical": "P1", "high": "P2", "medium": "P3", "low": "P4", "info": "P4"}.get(severity, "P3")
+
+
+# --- Wiz file import (alternative to GraphQL sync) -------------------------
+
+@app.post("/api/wiz/import-file")
+def wiz_import_file(request: Request, body: dict = Body(...), db=Depends(get_session)):
+    """Import Wiz findings from a JSON export (Wiz Reports or manual export).
+
+    Accepts the body format:
+      { "findings": [ { ... raw Wiz node ... }, ... ] }
+    or the Wiz Reports CSV-to-JSON format:
+      { "data": { "vulnerabilityFindings": { "nodes": [...] } } }
+    """
+    from .config import reload_settings
+    reload_settings()
+    actor = current_user(request)
+
+    nodes = []
+    if "findings" in body:
+        nodes = body["findings"]
+    elif "data" in body:
+        data = body["data"]
+        for key in ("vulnerabilityFindings", "configurationFindings"):
+            block = data.get(key, {})
+            nodes.extend(block.get("nodes", []))
+    else:
+        nodes = body.get("nodes", [])
+
+    if not nodes:
+        raise HTTPException(422, "No findings found in the uploaded data. "
+                            "Expected 'findings', 'data.vulnerabilityFindings.nodes', or 'nodes' key.")
+
+    from .connectors.wiz import WizConnector
+    from .sync import run_sync_from_records
+    wiz = WizConnector()
+
+    records = []
+    errors = []
+    for i, node in enumerate(nodes):
+        try:
+            rec = wiz._map_vuln(node)
+            if rec:
+                records.append(rec)
+        except Exception as exc:
+            errors.append({"index": i, "id": node.get("id"), "error": str(exc)})
+
+    if not records:
+        return JSONResponse({
+            "ok": False,
+            "error": f"Could not map any of {len(nodes)} nodes to findings",
+            "mapping_errors": errors[:20],
+        }, status_code=422)
+
+    result = run_sync_from_records(db, "wiz", records, actor=actor)
+    result["mapping_errors"] = errors[:20]
+    result["ok"] = True
+    return result
 
 
 # --- static UI --------------------------------------------------------------

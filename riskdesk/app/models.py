@@ -576,3 +576,45 @@ class ConnectorConfig(Base):
     config = Column(JSON, nullable=False, default=dict)
     updated_by = Column(String(256))
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# =========================================================================
+# Ticket tracking (Jira integration)
+# =========================================================================
+
+class Ticket(Base):
+    """An external ticket (Jira, ServiceNow, etc.) linked to one or more findings.
+
+    Tracks the full lifecycle: discovery in RiskDesk -> ticket creation ->
+    assignment -> resolution. Status is synced from the external system or
+    updated manually.
+    """
+    __tablename__ = "tickets"
+    id = Column(Integer, primary_key=True)
+    external_id = Column(String(128), nullable=False, index=True)   # e.g. "VULN-1234"
+    external_url = Column(String(1024))                             # link to Jira
+    provider = Column(String(32), nullable=False, default="jira")   # jira | servicenow | manual
+    project_key = Column(String(64))                                # Jira project key
+    issue_type = Column(String(64))                                 # Bug, Task, Story
+    summary = Column(String(1024), nullable=False)
+    description = Column(Text)
+    status = Column(String(64), nullable=False, default="open", index=True)   # open, in_progress, resolved, closed, won't_fix
+    priority = Column(String(32))                                   # P1-P4 or Jira priority name
+    assignee = Column(String(256))
+    reporter = Column(String(256))
+
+    finding_ids = Column(JSON, default=list)     # list of finding.id values this ticket covers
+    vuln_ids = Column(JSON, default=list)        # list of vuln canonical_ids for grouping context
+    finding_count = Column(Integer, default=0)
+    severity = Column(String(16))                # highest severity among linked findings
+
+    created_by = Column(String(256), nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    synced_at = Column(DateTime, nullable=True)  # last time status was synced from external
+
+    __table_args__ = (
+        Index("ix_ticket_status", "status", "provider"),
+        Index("ix_ticket_external", "provider", "external_id"),
+    )
