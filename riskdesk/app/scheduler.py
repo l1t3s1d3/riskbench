@@ -72,6 +72,7 @@ def _tick():
                 _run_scheduled(db, sched, now)
 
         _maybe_sync_tickets(db, now)
+        _maybe_check_sla(db, now)
     finally:
         db.close()
 
@@ -95,6 +96,33 @@ def _maybe_sync_tickets(db, now: dt.datetime):
             log.info("Ticket sync: %d tickets synced", result["synced"])
     except Exception:
         log.exception("Scheduled ticket sync failed")
+
+
+_last_sla_check: dt.datetime | None = None
+SLA_CHECK_INTERVAL_HOURS = 24
+
+
+def _maybe_check_sla(db, now: dt.datetime):
+    """Run SLA breach check and send notifications once per day."""
+    global _last_sla_check
+    from .config import settings as cfg
+    if not cfg.notifications.sla_check_enabled:
+        return
+    if not cfg.notifications.configured:
+        return
+    if _last_sla_check is not None:
+        elapsed = (now - _last_sla_check).total_seconds() / 3600
+        if elapsed < SLA_CHECK_INTERVAL_HOURS:
+            return
+    try:
+        from .notifications import send_sla_notifications
+        result = send_sla_notifications(db)
+        _last_sla_check = now
+        if result.get("total_overdue", 0) > 0:
+            log.info("SLA check: %d overdue, notification sent: %s",
+                     result["total_overdue"], result.get("notification_sent"))
+    except Exception:
+        log.exception("Scheduled SLA check failed")
 
 
 def _is_due(sched: SyncSchedule, now: dt.datetime) -> bool:

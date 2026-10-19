@@ -92,11 +92,29 @@ class Policy:
 
 
 @dataclass
+class NotificationConfig:
+    """SLA breach notification channels."""
+    slack_webhook_url: str = field(default_factory=lambda: os.getenv("RISKDESK_SLACK_WEBHOOK", ""))
+    email_smtp_host: str = field(default_factory=lambda: os.getenv("RISKDESK_SMTP_HOST", ""))
+    email_smtp_port: int = field(default_factory=lambda: _int("RISKDESK_SMTP_PORT", 587))
+    email_from: str = field(default_factory=lambda: os.getenv("RISKDESK_EMAIL_FROM", ""))
+    email_to: list[str] = field(default_factory=lambda: _list("RISKDESK_EMAIL_TO"))
+    sla_check_enabled: bool = field(
+        default_factory=lambda: os.getenv("RISKDESK_SLA_CHECK_ENABLED", "1") == "1"
+    )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.slack_webhook_url or (self.email_smtp_host and self.email_from))
+
+
+@dataclass
 class Settings:
     wiz: WizConfig = field(default_factory=WizConfig)
     falcon: FalconConfig = field(default_factory=FalconConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     policy: Policy = field(default_factory=Policy)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     # Local identity. This build has no SSO; the current user is whoever the
     # browser session says it is, chosen from this roster. See README.
@@ -129,4 +147,5 @@ def reload_settings() -> Settings:
     settings.default_user = fresh.default_user
     settings.org_name = fresh.org_name
     settings.stale_after_days = fresh.stale_after_days
+    settings.notifications = fresh.notifications
     return settings

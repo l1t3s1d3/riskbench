@@ -320,7 +320,8 @@ def serialize_finding(f: Finding, risk, adj: Adjudication | None) -> dict:
             "region": f.asset.region, "environment": f.asset.environment,
             "internet_facing": f.asset.internet_facing,
             "data_classification": f.asset.data_classification,
-            "owner": f.asset.owner, "tags": f.asset.tags or {},
+            "owner": f.asset.owner, "business_unit": f.asset.business_unit,
+            "tags": f.asset.tags or {},
         },
         "vuln": {
             "canonical_id": f.vuln.canonical_id, "cve_id": f.vuln.cve_id,

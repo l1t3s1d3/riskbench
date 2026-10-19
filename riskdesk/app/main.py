@@ -6,6 +6,7 @@ in the ``routes/`` package; this file is just wiring.
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,20 +29,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 STATIC = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="RiskDesk", version="1.0.0", docs_url="/api/docs")
 
-
-# --- exception handlers -----------------------------------------------------
-
-@app.exception_handler(adj_service.PolicyError)
-def _policy_error(_request, exc: adj_service.PolicyError):
-    return JSONResponse(status_code=422, content={"problems": exc.problems})
-
-
-# --- startup ----------------------------------------------------------------
-
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- startup ---
     init_db()
     from .db import SessionLocal
     db = SessionLocal()
@@ -56,6 +47,19 @@ def _startup():
         db.close()
     from . import scheduler
     scheduler.start()
+    yield
+    # --- shutdown ---
+    scheduler.stop()
+
+
+app = FastAPI(title="RiskDesk", version="1.0.0", docs_url="/api/docs", lifespan=lifespan)
+
+
+# --- exception handlers -----------------------------------------------------
+
+@app.exception_handler(adj_service.PolicyError)
+def _policy_error(_request, exc: adj_service.PolicyError):
+    return JSONResponse(status_code=422, content={"problems": exc.problems})
 
 
 # --- routers ----------------------------------------------------------------

@@ -49,17 +49,42 @@ class Asset(Base):
     internet_facing = Column(Boolean, nullable=True)
     data_classification = Column(String(64), nullable=True)
 
+    business_unit = Column(String(256), nullable=True, index=True)
+    asset_group_id = Column(Integer, ForeignKey("asset_groups.id"), nullable=True, index=True)
+
     owner = Column(String(256))
     tags = Column(JSON, default=dict)
     first_seen = Column(DateTime, default=utcnow)
     last_seen = Column(DateTime, default=utcnow)
 
     findings = relationship("Finding", back_populates="asset")
+    group = relationship("AssetGroup", back_populates="assets")
 
     __table_args__ = (
         UniqueConstraint("source", "source_asset_id", name="uq_asset_source"),
         Index("ix_asset_name", "name"),
     )
+
+
+class AssetGroup(Base):
+    """Logical grouping of assets by business unit, team, or function.
+
+    Lets you scope decisions, reports, and SLA tracking by organizational unit
+    instead of individual assets.
+    """
+    __tablename__ = "asset_groups"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(256), nullable=False, unique=True)
+    description = Column(Text)
+    business_unit = Column(String(256), index=True)
+    owner = Column(String(256))
+    criticality = Column(String(32), default="medium")
+    tags = Column(JSON, default=dict)
+    created_by = Column(String(256))
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    assets = relationship("Asset", back_populates="group")
 
 
 class Vuln(Base):

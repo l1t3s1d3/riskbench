@@ -1,10 +1,14 @@
 """Sync, schedule, and connector diagnostics routes."""
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import json
+import threading
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import select
 
 from ..api_queries import (
@@ -15,6 +19,7 @@ from ..api_queries import (
 )
 from ..db import get_session
 from ..models import AuditEvent, SyncRun, SyncSchedule
+from ..schemas import QueryRegistryOut, ScheduleOut, SyncRunOut
 from ..sync import get_connector, run_sync
 from .deps import current_user
 
@@ -387,3 +392,50 @@ def delete_schedule(source: str, request: Request, db=Depends(get_session)):
     db.delete(row)
     db.commit()
     return {"deleted": source}
+
+
+# --- SSE live sync progress -------------------------------------------------
+
+_sync_subscribers: dict[str, list[asyncio.Queue]] = {}
+_sub_lock = threading.Lock()
+
+
+def _broadcast_sync_event(source: str, event: dict):
+    """Push a progress event to all SSE subscribers for a source."""
+    with _sub_lock:
+        queues = _sync_subscribers.get(source, [])
+        for q in queues:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+
+@router.get("/sync/progress/{source}")
+async def sync_progress_sse(source: str, request: Request):
+    """SSE endpoint for live sync progress. Connect before triggering a sync."""
+    if source not in ("wiz", "falcon", "github"):
+        raise HTTPException(400, "Unknown source.")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    with _sub_lock:
+        _sync_subscribers.setdefault(source, []).append(queue)
+
+    async def event_generator():
+        try:
+            yield {"event": "connected", "data": json.dumps({"source": source})}
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield {"event": event.get("type", "progress"), "data": json.dumps(event)}
+                    if event.get("type") == "complete":
+                        break
+                except asyncio.TimeoutError:
+                    yield {"event": "heartbeat", "data": json.dumps({"ts": dt.datetime.now(dt.timezone.utc).isoformat()})}
+        finally:
+            with _sub_lock:
+                subs = _sync_subscribers.get(source, [])
+                if queue in subs:
+                    subs.remove(queue)
+
+    return EventSourceResponse(event_generator())

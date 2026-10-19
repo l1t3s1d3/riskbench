@@ -45,7 +45,7 @@ db_mod.SessionLocal = _TestSession
 
 from app.main import app  # noqa: E402
 from app.db import get_session  # noqa: E402
-from app.models import Asset, Finding, Ticket, TicketFinding, User, Vuln  # noqa: E402
+from app.models import Asset, AssetGroup, Finding, Ticket, TicketFinding, User, Vuln  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

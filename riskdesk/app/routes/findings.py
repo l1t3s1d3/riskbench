@@ -5,7 +5,7 @@ import csv
 import datetime as dt
 import io
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
@@ -21,6 +21,11 @@ from ..queries import (
     facets as get_facets, search, serialize_finding,
 )
 from ..risk import compute_risk, default_expiry, default_review_due
+from ..schemas import (
+    AuditPageOut, BulkAdjudicationOut, DashboardOut,
+    FindingDetailOut, FindingListOut, FindingIdsOut,
+    MetaOut, SLABreachReportOut, VerifyOut,
+)
 from ..sync import get_connector
 from .deps import current_user
 
@@ -52,7 +57,7 @@ def _filter_from_query(
     )
 
 
-@router.get("/meta")
+@router.get("/meta", response_model=MetaOut)
 def meta(request: Request, db=Depends(get_session)):
     demo_rows = db.execute(
         select(func.count()).select_from(Finding)
@@ -90,7 +95,7 @@ def meta(request: Request, db=Depends(get_session)):
     }
 
 
-@router.get("/findings")
+@router.get("/findings", response_model=FindingListOut)
 def list_findings(f: FindingFilter = Depends(_filter_from_query),
                   page: int = 1, page_size: int = 50,
                   include_ids: bool = False, db=Depends(get_session)):
@@ -101,7 +106,7 @@ def list_findings(f: FindingFilter = Depends(_filter_from_query),
     return result
 
 
-@router.get("/findings/ids")
+@router.get("/findings/ids", response_model=FindingIdsOut)
 def matching_ids(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_session)):
     result = search(db, f, page=1, page_size=1)
     return {"total": result["total"], "ids": result["all_matching_ids"]}
@@ -138,7 +143,7 @@ def get_finding(finding_id: int, db=Depends(get_session)):
     return payload
 
 
-@router.post("/findings/{finding_id}/verify")
+@router.post("/findings/{finding_id}/verify", response_model=VerifyOut)
 def verify_finding(finding_id: int, request: Request, db=Depends(get_session)):
     """Mark a fixed finding as verified fixed."""
     from fastapi import HTTPException
@@ -161,7 +166,7 @@ def verify_finding(finding_id: int, request: Request, db=Depends(get_session)):
     return {"ok": True, "finding_id": finding_id, "status": "verified_fixed"}
 
 
-@router.get("/dashboard")
+@router.get("/dashboard", response_model=DashboardOut)
 def dashboard(db=Depends(get_session)):
     now = dt.datetime.now(dt.timezone.utc)
     resolution = build_resolution_map(db)
@@ -245,21 +250,52 @@ def dashboard(db=Depends(get_session)):
     }
 
 
-@router.get("/audit")
-def audit(limit: int = 200, action: list[str] = Query(default=[]),
+@router.get("/audit", response_model=AuditPageOut)
+def audit(limit: int = 100, cursor: int | None = None,
+          action: list[str] = Query(default=[]),
+          actor_filter: str = "",
+          entity_type: str = "",
           entity_id: str = "", db=Depends(get_session)):
     from ..models import AuditEvent
+    limit = min(limit, 500)
     stmt = select(AuditEvent)
+    if cursor is not None:
+        stmt = stmt.where(AuditEvent.id < cursor)
     if action:
         stmt = stmt.where(AuditEvent.action.in_(action))
+    if actor_filter:
+        stmt = stmt.where(AuditEvent.actor == actor_filter)
+    if entity_type:
+        stmt = stmt.where(AuditEvent.entity_type == entity_type)
     if entity_id:
         stmt = stmt.where(AuditEvent.entity_id == entity_id)
-    rows = db.execute(stmt.order_by(AuditEvent.ts.desc()).limit(limit)).scalars().all()
-    return [{
-        "id": e.id, "ts": e.ts.isoformat(), "actor": e.actor, "action": e.action,
-        "entity_type": e.entity_type, "entity_id": e.entity_id,
-        "summary": e.summary, "detail": e.detail,
-    } for e in rows]
+
+    count_stmt = select(func.count()).select_from(AuditEvent)
+    if action:
+        count_stmt = count_stmt.where(AuditEvent.action.in_(action))
+    if actor_filter:
+        count_stmt = count_stmt.where(AuditEvent.actor == actor_filter)
+    if entity_type:
+        count_stmt = count_stmt.where(AuditEvent.entity_type == entity_type)
+    if entity_id:
+        count_stmt = count_stmt.where(AuditEvent.entity_id == entity_id)
+    total = db.execute(count_stmt).scalar() or 0
+
+    rows = db.execute(stmt.order_by(AuditEvent.id.desc()).limit(limit + 1)).scalars().all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = rows[-1].id if rows and has_more else None
+
+    return {
+        "events": [{
+            "id": e.id, "ts": e.ts.isoformat(), "actor": e.actor, "action": e.action,
+            "entity_type": e.entity_type, "entity_id": e.entity_id,
+            "summary": e.summary, "detail": e.detail,
+        } for e in rows],
+        "total": total,
+        "cursor": next_cursor,
+        "has_more": has_more,
+    }
 
 
 @router.get("/export/register.csv")
@@ -293,6 +329,122 @@ def export_register(db=Depends(get_session)):
         iter([buf.getvalue()]), media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="risk-register-{stamp}.csv"'},
     )
+
+
+@router.get("/sla/breaches", response_model=SLABreachReportOut)
+def sla_breaches(notify: bool = False, db=Depends(get_session)):
+    """Check all open findings for SLA breaches. Pass notify=true to send alerts."""
+    from ..notifications import check_sla_breaches, send_sla_notifications
+    if notify:
+        return send_sla_notifications(db)
+    report = check_sla_breaches(db)
+    report["notification_sent"] = False
+    return report
+
+
+@router.post("/adjudications/bulk-csv", response_model=BulkAdjudicationOut)
+async def bulk_adjudicate_csv(request: Request, file: UploadFile = File(...),
+                              db=Depends(get_session)):
+    """Import adjudications from a CSV file.
+
+    Expected columns: canonical_id, disposition, justification, approver,
+    scope (optional, default 'vuln'), expires_at (optional),
+    adjusted_severity (optional), compensating_controls (optional).
+    """
+    from ..models import AuditEvent
+    from .. import adjudication as adj_svc
+
+    actor = current_user(request)
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+
+    reader = csv.DictReader(io.StringIO(text))
+    results: list[dict] = []
+    succeeded = 0
+    failed = 0
+
+    for row_num, row in enumerate(reader, start=2):
+        canonical_id = (row.get("canonical_id") or "").strip()
+        disposition = (row.get("disposition") or "").strip()
+        justification = (row.get("justification") or "").strip()
+        approver = (row.get("approver") or "").strip() or None
+        scope = (row.get("scope") or "vuln").strip()
+        expires_str = (row.get("expires_at") or "").strip()
+        adjusted_severity = (row.get("adjusted_severity") or "").strip() or None
+        compensating = (row.get("compensating_controls") or "").strip() or None
+
+        if not canonical_id or not disposition:
+            results.append({
+                "row": row_num, "status": "error", "canonical_id": canonical_id,
+                "finding_ids": [], "error": "Missing canonical_id or disposition",
+            })
+            failed += 1
+            continue
+
+        findings = db.execute(
+            select(Finding).join(Vuln, Finding.vuln_id == Vuln.id)
+            .where(Vuln.canonical_id == canonical_id, Finding.status == "open")
+        ).scalars().all()
+
+        if not findings:
+            results.append({
+                "row": row_num, "status": "skipped", "canonical_id": canonical_id,
+                "finding_ids": [], "error": "No open findings match this canonical_id",
+            })
+            failed += 1
+            continue
+
+        fids = [f.id for f in findings]
+        expires_at = None
+        if expires_str:
+            from .deps import parse_date
+            try:
+                expires_at = parse_date(expires_str)
+            except Exception:
+                results.append({
+                    "row": row_num, "status": "error", "canonical_id": canonical_id,
+                    "finding_ids": fids, "error": f"Bad expires_at: {expires_str}",
+                })
+                failed += 1
+                continue
+
+        try:
+            created = adj_svc.create_decisions(
+                db, finding_ids=fids, disposition=disposition,
+                justification=justification, actor=actor, scope=scope,
+                approver=approver, expires_at=expires_at,
+                adjusted_severity=adjusted_severity,
+                compensating_controls=compensating,
+            )
+            results.append({
+                "row": row_num, "status": "ok", "canonical_id": canonical_id,
+                "finding_ids": fids, "error": None,
+            })
+            succeeded += 1
+        except Exception as exc:
+            results.append({
+                "row": row_num, "status": "error", "canonical_id": canonical_id,
+                "finding_ids": fids, "error": str(exc),
+            })
+            failed += 1
+
+    db.add(AuditEvent(
+        actor=actor, action="adjudication.bulk_csv",
+        entity_type="adjudication", entity_id="bulk",
+        summary=f"Bulk CSV import: {succeeded} succeeded, {failed} failed out of {succeeded + failed} rows",
+    ))
+    db.commit()
+
+    return {
+        "ok": failed == 0,
+        "processed": succeeded + failed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "results": results[:500],
+    }
 
 
 @router.get("/export/findings.csv")

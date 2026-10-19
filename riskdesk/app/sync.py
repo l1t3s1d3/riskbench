@@ -25,6 +25,39 @@ log = logging.getLogger(__name__)
 BATCH = 500
 
 
+def _notify_progress(source: str, stats: dict, new_by_severity: dict):
+    """Push a progress event to SSE subscribers (no-op if none connected)."""
+    try:
+        from .routes.sync import _broadcast_sync_event
+        _broadcast_sync_event(source, {
+            "type": "progress",
+            "source": source,
+            "findings": stats.get("findings", 0),
+            "new": stats.get("new", 0),
+            "assets": stats.get("assets", 0),
+            "new_by_severity": new_by_severity,
+        })
+    except Exception:
+        pass
+
+
+def _notify_complete(source: str, result: dict):
+    """Push a completion event to SSE subscribers."""
+    try:
+        from .routes.sync import _broadcast_sync_event
+        _broadcast_sync_event(source, {
+            "type": "complete",
+            "source": source,
+            "status": result.get("status", "unknown"),
+            "findings": result.get("findings", 0),
+            "new": result.get("new", 0),
+            "closed": result.get("closed", 0),
+            "error": result.get("error"),
+        })
+    except Exception:
+        pass
+
+
 def get_connector(source: str, demo: bool = False):
     from .connectors.demo import DemoConnector
     if demo:
@@ -76,6 +109,7 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
             pending += 1
             if pending >= BATCH:
                 db.commit()
+                _notify_progress(source, stats, new_severity)
                 pending = 0
         db.commit()
 
@@ -127,6 +161,7 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
             "new_by_severity": new_severity,
             "auto_assigned": assign_stats.get("assigned", 0) if assign_stats else 0,
         }
+        _notify_complete(source, result)
         db.close()
     return result
 
