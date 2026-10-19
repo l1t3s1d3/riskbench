@@ -34,6 +34,7 @@ class FindingCategory(str, Enum):
 class FindingStatus(str, Enum):
     OPEN = "open"
     FIXED = "fixed"
+    VERIFIED_FIXED = "verified_fixed"
     SUPPRESSED_AT_SOURCE = "suppressed_at_source"
     STALE = "stale"          # not seen in the last N syncs
 

@@ -23,13 +23,17 @@ from typing import Iterator
 
 import httpx
 
+from ..api_queries import (
+    FALCON_DEFAULT_FQL,
+    FALCON_SPOTLIGHT_FACETS,
+    FALCON_SPOTLIGHT_PATH,
+    FALCON_TOKEN_PATH,
+)
 from ..config import settings
 from ..enums import FindingCategory, Severity, normalize_severity
 from .base import Connector, NormalizedAsset, NormalizedRecord, NormalizedVuln, parse_ts
 
 log = logging.getLogger(__name__)
-
-FACETS = ["cve", "host_info", "remediation", "evaluation_logic"]
 
 
 class FalconConnector(Connector):
@@ -58,7 +62,7 @@ class FalconConnector(Connector):
         if self.cfg.member_cid:
             data["member_cid"] = self.cfg.member_cid
         r = httpx.post(
-            f"{self.cfg.base_url}/oauth2/token",
+            f"{self.cfg.base_url}{FALCON_TOKEN_PATH}",
             data=data,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
@@ -82,7 +86,7 @@ class FalconConnector(Connector):
             return False, str(exc)
         try:
             r = httpx.get(
-                f"{self.cfg.base_url}/spotlight/combined/vulnerabilities/v1",
+                f"{self.cfg.base_url}{FALCON_SPOTLIGHT_PATH}",
                 params={"filter": self.cfg.filter_fql, "limit": 1},
                 headers=self._headers(), timeout=30,
             )
@@ -105,12 +109,12 @@ class FalconConnector(Connector):
             params = {
                 "filter": self.cfg.filter_fql,
                 "limit": min(self.cfg.page_size, 400),
-                "facet": FACETS,
+                "facet": FALCON_SPOTLIGHT_FACETS,
             }
             if after:
                 params["after"] = after
             r = self._get_with_retry(
-                f"{self.cfg.base_url}/spotlight/combined/vulnerabilities/v1", params
+                f"{self.cfg.base_url}{FALCON_SPOTLIGHT_PATH}", params
             )
             body = r.json()
             resources = body.get("resources") or []

@@ -117,6 +117,9 @@ class Finding(Base):
     last_seen = Column(DateTime, default=utcnow, index=True)
     closed_at = Column(DateTime, nullable=True)
 
+    verified_by = Column(String(256), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+
     source_url = Column(String(1024))
     raw = Column(JSON, default=dict)        # untouched source payload
 
@@ -582,6 +585,18 @@ class ConnectorConfig(Base):
 # Ticket tracking (Jira integration)
 # =========================================================================
 
+class TicketFinding(Base):
+    """Join table linking tickets to findings (replaces JSON array)."""
+    __tablename__ = "ticket_findings"
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_id = Column(Integer, ForeignKey("findings.id"), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("ticket_id", "finding_id", name="uq_ticket_finding"),
+    )
+
+
 class Ticket(Base):
     """An external ticket (Jira, ServiceNow, etc.) linked to one or more findings.
 
@@ -603,7 +618,6 @@ class Ticket(Base):
     assignee = Column(String(256))
     reporter = Column(String(256))
 
-    finding_ids = Column(JSON, default=list)     # list of finding.id values this ticket covers
     vuln_ids = Column(JSON, default=list)        # list of vuln canonical_ids for grouping context
     finding_count = Column(Integer, default=0)
     severity = Column(String(16))                # highest severity among linked findings
@@ -613,6 +627,8 @@ class Ticket(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     resolved_at = Column(DateTime, nullable=True)
     synced_at = Column(DateTime, nullable=True)  # last time status was synced from external
+
+    ticket_findings = relationship("TicketFinding", backref="ticket", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_ticket_status", "status", "provider"),

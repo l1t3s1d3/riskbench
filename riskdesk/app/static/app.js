@@ -526,6 +526,16 @@ async function openDetail(id) {
       ${f.decision_history.length ? `<div class="sec"><h3>Decision history</h3>
         ${f.decision_history.map(historyHtml).join('')}</div>` : ''}
 
+      ${f.status === 'fixed' ? `<div class="sec">
+        <h3>Verification</h3>
+        <p style="margin-bottom:8px">This finding has been marked as fixed. Verify the fix is effective:</p>
+        <button class="btn btn-seal" onclick="verifyFinding(${f.id})">Verify fix</button>
+      </div>` : ''}
+      ${f.status === 'verified_fixed' ? `<div class="sec">
+        <h3>Verification</h3>
+        <p class="ok-text" style="color:var(--green,#22863a)">Verified fixed${f.verified_by ? ' by ' + esc(f.verified_by) : ''}${f.verified_at ? ' on ' + fmtDate(f.verified_at) : ''}</p>
+      </div>` : ''}
+
       <div class="sec" id="findingTickets" data-finding-id="${f.id}">
         <h3>Tickets</h3>
         <div id="findingTicketList"><span class="na">Loading…</span></div>
@@ -2449,6 +2459,15 @@ async function updateTicketStatus(id, current) {
     openTicketDetail(id);
     if (state.view === 'tickets') loadTickets();
   } catch (e) { toast(e.message, true); }
+}
+
+async function verifyFinding(id) {
+  if (!confirm('Mark this finding as verified fixed?')) return;
+  try {
+    await api(`/api/findings/${id}/verify`, { method: 'POST' });
+    toast('Finding verified as fixed');
+    openDetail(id);
+  } catch (e) { toast(e.message || 'Verification failed', true); }
 }
 
 async function loadFindingTickets(findingId) {

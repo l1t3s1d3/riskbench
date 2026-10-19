@@ -70,8 +70,31 @@ def _tick():
         for sched in schedules:
             if _is_due(sched, now):
                 _run_scheduled(db, sched, now)
+
+        _maybe_sync_tickets(db, now)
     finally:
         db.close()
+
+
+_last_ticket_sync: dt.datetime | None = None
+TICKET_SYNC_INTERVAL_HOURS = 1
+
+
+def _maybe_sync_tickets(db, now: dt.datetime):
+    """Sync open Jira tickets at most once per TICKET_SYNC_INTERVAL_HOURS."""
+    global _last_ticket_sync
+    if _last_ticket_sync is not None:
+        elapsed = (now - _last_ticket_sync).total_seconds() / 3600
+        if elapsed < TICKET_SYNC_INTERVAL_HOURS:
+            return
+    try:
+        from .ticket_sync import sync_open_jira_tickets
+        result = sync_open_jira_tickets(db, actor="scheduler:ticket_sync")
+        _last_ticket_sync = now
+        if result.get("synced", 0) > 0:
+            log.info("Ticket sync: %d tickets synced", result["synced"])
+    except Exception:
+        log.exception("Scheduled ticket sync failed")
 
 
 def _is_due(sched: SyncSchedule, now: dt.datetime) -> bool:

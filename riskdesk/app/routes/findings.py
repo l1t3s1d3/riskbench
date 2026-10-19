@@ -1,0 +1,334 @@
+"""Findings, facets, dashboard, and CSV export routes."""
+from __future__ import annotations
+
+import csv
+import datetime as dt
+import io
+
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
+from sqlalchemy.orm import joinedload
+
+from ..config import settings
+from ..db import get_session
+from ..enums import Disposition, FindingCategory, ScopeType, Severity, DISPOSITION_LABELS
+from ..models import (
+    Adjudication, AdjudicationApplication, Asset, Finding, SyncRun, Vuln,
+)
+from ..queries import (
+    FindingFilter, _serialize_adj, build_pending_map, build_resolution_map,
+    facets as get_facets, search, serialize_finding,
+)
+from ..risk import compute_risk, default_expiry, default_review_due
+from ..sync import get_connector
+from .deps import current_user
+
+router = APIRouter(prefix="/api", tags=["findings"])
+
+
+def _filter_from_query(
+    source: list[str] = Query(default=[]),
+    severity: list[str] = Query(default=[]),
+    status: list[str] = Query(default=["open"]),
+    category: list[str] = Query(default=[]),
+    disposition: list[str] = Query(default=[]),
+    priority: list[str] = Query(default=[]),
+    kev: bool = False,
+    fixable: bool = False,
+    overdue: bool = False,
+    undecided: bool = False,
+    q: str = "",
+    asset: str = "",
+    cve: str = "",
+    sort: str = "risk",
+    order: str = "desc",
+) -> FindingFilter:
+    return FindingFilter(
+        sources=source, severities=severity, statuses=status, categories=category,
+        dispositions=disposition, priorities=priority, kev_only=kev,
+        fixable_only=fixable, overdue_only=overdue, undecided_only=undecided,
+        q=q, asset=asset, cve=cve, sort=sort, order=order,
+    )
+
+
+@router.get("/meta")
+def meta(request: Request, db=Depends(get_session)):
+    demo_rows = db.execute(
+        select(func.count()).select_from(Finding)
+        .where(Finding.raw.contains('"demo": true'))
+    ).scalar() or 0
+    return {
+        "org": settings.org_name,
+        "users": settings.users,
+        "approvers": settings.approvers,
+        "current_user": current_user(request),
+        "dispositions": [
+            {"value": d.value, "label": DISPOSITION_LABELS[d],
+             "is_risk_decision": d.value in {"accept_risk", "adjust_risk", "false_positive"}}
+            for d in Disposition
+        ],
+        "severities": [s.value for s in Severity],
+        "categories": [c.value for c in FindingCategory],
+        "scopes": [
+            {"value": ScopeType.FINDING.value, "label": "This finding only"},
+            {"value": ScopeType.VULN_ON_ASSET.value, "label": "This vulnerability on this asset"},
+            {"value": ScopeType.VULN.value, "label": "This vulnerability everywhere"},
+            {"value": ScopeType.COMPONENT.value, "label": "This component or rule everywhere"},
+        ],
+        "policy": {
+            "min_justification_chars": settings.policy.min_justification_chars,
+            "max_acceptance_days": settings.policy.max_acceptance_days,
+            "remediation_sla_days": settings.policy.remediation_sla_days,
+            "require_separate_approver": settings.policy.require_separate_approver,
+        },
+        "connectors": {
+            name: get_connector(name).configured()
+            for name in ("wiz", "falcon", "github")
+        },
+        "demo_findings": demo_rows,
+    }
+
+
+@router.get("/findings")
+def list_findings(f: FindingFilter = Depends(_filter_from_query),
+                  page: int = 1, page_size: int = 50,
+                  include_ids: bool = False, db=Depends(get_session)):
+    result = search(db, f, page=page, page_size=min(page_size, 200))
+    if not include_ids:
+        result.pop("all_matching_ids", None)
+    result["filter"] = f.as_dict()
+    return result
+
+
+@router.get("/findings/ids")
+def matching_ids(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_session)):
+    result = search(db, f, page=1, page_size=1)
+    return {"total": result["total"], "ids": result["all_matching_ids"]}
+
+
+@router.get("/facets")
+def facets_endpoint(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_session)):
+    return get_facets(db, f)
+
+
+@router.get("/findings/{finding_id}")
+def get_finding(finding_id: int, db=Depends(get_session)):
+    from fastapi import HTTPException
+    obj = db.execute(
+        select(Finding).options(joinedload(Finding.asset), joinedload(Finding.vuln))
+        .where(Finding.id == finding_id)
+    ).scalar_one_or_none()
+    if obj is None:
+        raise HTTPException(404, "No such finding.")
+
+    resolution = build_resolution_map(db)
+    pending = build_pending_map(db)
+    adj = resolution.get(finding_id)
+    risk = compute_risk(obj, adj, has_pending=finding_id in pending)
+    payload = serialize_finding(obj, risk, adj)
+
+    history = db.execute(
+        select(Adjudication).join(AdjudicationApplication)
+        .where(AdjudicationApplication.finding_id == finding_id)
+        .order_by(Adjudication.requested_at.desc())
+    ).unique().scalars().all()
+    payload["decision_history"] = [_serialize_adj(a) for a in history]
+    payload["raw"] = obj.raw
+    return payload
+
+
+@router.post("/findings/{finding_id}/verify")
+def verify_finding(finding_id: int, request: Request, db=Depends(get_session)):
+    """Mark a fixed finding as verified fixed."""
+    from fastapi import HTTPException
+    from ..models import AuditEvent
+    obj = db.get(Finding, finding_id)
+    if obj is None:
+        raise HTTPException(404, "No such finding.")
+    if obj.status != "fixed":
+        raise HTTPException(422, f"Finding must be in 'fixed' status to verify (currently '{obj.status}').")
+    actor = current_user(request)
+    obj.status = "verified_fixed"
+    obj.verified_by = actor
+    obj.verified_at = dt.datetime.now(dt.timezone.utc)
+    db.add(AuditEvent(
+        actor=actor, action="finding.verify",
+        entity_type="finding", entity_id=str(finding_id),
+        summary=f"Finding #{finding_id} verified as fixed",
+    ))
+    db.commit()
+    return {"ok": True, "finding_id": finding_id, "status": "verified_fixed"}
+
+
+@router.get("/dashboard")
+def dashboard(db=Depends(get_session)):
+    now = dt.datetime.now(dt.timezone.utc)
+    resolution = build_resolution_map(db)
+
+    rows = db.execute(
+        select(Finding.id, Finding.severity, Finding.source, Finding.first_detected,
+               Vuln.kev)
+        .join(Vuln, Finding.vuln_id == Vuln.id)
+        .where(Finding.status == "open")
+    ).all()
+
+    by_severity: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    by_disposition: dict[str, int] = {}
+    overdue = 0
+    kev_open = 0
+
+    for fid, sev, source, first_detected, kev in rows:
+        adj = resolution.get(fid)
+        eff = sev
+        disp = adj.disposition if adj else "none"
+        if adj and adj.disposition == Disposition.ADJUST_RISK.value and adj.adjusted_severity:
+            eff = adj.adjusted_severity
+        by_severity[eff] = by_severity.get(eff, 0) + 1
+        by_source[source] = by_source.get(source, 0) + 1
+        by_disposition[disp] = by_disposition.get(disp, 0) + 1
+        if kev:
+            kev_open += 1
+        if disp not in ("accept_risk", "false_positive"):
+            fd = first_detected or now
+            if fd.tzinfo is None:
+                fd = fd.replace(tzinfo=dt.timezone.utc)
+            days = settings.policy.remediation_sla_days.get(eff, 90)
+            if kev:
+                days = min(days, settings.policy.kev_sla_days)
+            if fd + dt.timedelta(days=days) < now:
+                overdue += 1
+
+    pending = db.execute(
+        select(func.count()).select_from(Adjudication)
+        .where(Adjudication.state == "pending_approval")
+    ).scalar() or 0
+
+    horizon = now + dt.timedelta(days=30)
+    expiring = db.execute(
+        select(func.count()).select_from(Adjudication)
+        .where(Adjudication.state == "approved",
+               Adjudication.expires_at.isnot(None),
+               Adjudication.expires_at <= horizon)
+    ).scalar() or 0
+    review_due = db.execute(
+        select(func.count()).select_from(Adjudication)
+        .where(Adjudication.state == "approved",
+               Adjudication.review_due.isnot(None),
+               Adjudication.review_due <= now)
+    ).scalar() or 0
+
+    runs = db.execute(
+        select(SyncRun).order_by(SyncRun.started_at.desc()).limit(6)
+    ).scalars().all()
+
+    return {
+        "open_findings": len(rows),
+        "unique_vulns": db.execute(select(func.count()).select_from(Vuln)).scalar(),
+        "assets": db.execute(select(func.count()).select_from(Asset)).scalar(),
+        "by_severity": by_severity,
+        "by_source": by_source,
+        "by_disposition": by_disposition,
+        "overdue": overdue,
+        "kev_open": kev_open,
+        "undecided": by_disposition.get("none", 0),
+        "pending_approvals": pending,
+        "expiring_30d": expiring,
+        "review_overdue": review_due,
+        "recent_syncs": [{
+            "id": r.id, "source": r.source, "status": r.status,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "findings": r.findings_upserted, "new": r.findings_new,
+            "closed": r.findings_closed, "error": r.error,
+        } for r in runs],
+    }
+
+
+@router.get("/audit")
+def audit(limit: int = 200, action: list[str] = Query(default=[]),
+          entity_id: str = "", db=Depends(get_session)):
+    from ..models import AuditEvent
+    stmt = select(AuditEvent)
+    if action:
+        stmt = stmt.where(AuditEvent.action.in_(action))
+    if entity_id:
+        stmt = stmt.where(AuditEvent.entity_id == entity_id)
+    rows = db.execute(stmt.order_by(AuditEvent.ts.desc()).limit(limit)).scalars().all()
+    return [{
+        "id": e.id, "ts": e.ts.isoformat(), "actor": e.actor, "action": e.action,
+        "entity_type": e.entity_type, "entity_id": e.entity_id,
+        "summary": e.summary, "detail": e.detail,
+    } for e in rows]
+
+
+@router.get("/export/register.csv")
+def export_register(db=Depends(get_session)):
+    rows = db.execute(select(Adjudication).order_by(Adjudication.requested_at.desc())).unique().scalars().all()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "id", "disposition", "state", "scope_type", "scope_key", "scope_label",
+        "findings_at_decision", "adjusted_severity", "adjusted_priority",
+        "justification", "compensating_controls", "requested_by", "requested_at",
+        "approver", "approved_by", "decided_at", "decision_note",
+        "review_due", "expires_at",
+    ])
+    for a in rows:
+        w.writerow([
+            a.id, a.disposition, a.state, a.scope_type, a.scope_key, a.scope_label,
+            len(a.applications), a.adjusted_severity or "", a.adjusted_priority or "",
+            (a.justification or "").replace("\n", " "),
+            (a.compensating_controls or "").replace("\n", " "),
+            a.requested_by, a.requested_at.isoformat() if a.requested_at else "",
+            a.approver or "", a.approved_by or "",
+            a.decided_at.isoformat() if a.decided_at else "",
+            (a.decision_note or "").replace("\n", " "),
+            a.review_due.isoformat() if a.review_due else "",
+            a.expires_at.isoformat() if a.expires_at else "",
+        ])
+    buf.seek(0)
+    stamp = dt.date.today().isoformat()
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="risk-register-{stamp}.csv"'},
+    )
+
+
+@router.get("/export/findings.csv")
+def export_findings(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_session)):
+    result = search(db, f, page=1, page_size=100000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "finding_id", "source", "source_finding_id", "category", "vuln", "cve",
+        "title", "asset", "asset_type", "cloud_account", "environment",
+        "component", "location", "base_severity", "effective_severity",
+        "priority", "score", "kev", "cvss", "fix_available", "fix_version",
+        "first_detected", "sla_due", "sla_overdue", "disposition",
+        "decision_state", "decision_expires", "justification",
+    ])
+    for x in result["findings"]:
+        d = x.get("decision") or {}
+        w.writerow([
+            x["id"], x["source"], x["source_finding_id"], x["category"],
+            x["vuln"]["canonical_id"], x["vuln"]["cve_id"] or "",
+            (x["vuln"]["title"] or "").replace("\n", " "),
+            x["asset"]["name"], x["asset"]["type"] or "",
+            x["asset"]["cloud_account"] or "", x["asset"]["environment"] or "",
+            x["component"] or "", x["location"] or "",
+            x["risk"]["base_severity"], x["risk"]["effective_severity"],
+            x["risk"]["priority"], x["risk"]["score"],
+            x["vuln"]["kev"], x["vuln"]["cvss_score"] or "",
+            x["fix_available"], x["fix_version"] or "",
+            x["first_detected"] or "", x["risk"]["sla_due"] or "",
+            x["risk"]["sla_overdue"], d.get("disposition", ""),
+            d.get("state", ""), d.get("expires_at", "") or "",
+            (d.get("justification") or "").replace("\n", " "),
+        ])
+    buf.seek(0)
+    stamp = dt.date.today().isoformat()
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="findings-{stamp}.csv"'},
+    )

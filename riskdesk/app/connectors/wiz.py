@@ -28,95 +28,19 @@ from typing import Iterator
 
 import httpx
 
+from ..api_queries import (
+    WIZ_CONFIG_DEFAULT_FILTER,
+    WIZ_CONFIG_FINDINGS,
+    WIZ_INTROSPECT,
+    WIZ_PROBE,
+    WIZ_VULN_DEFAULT_FILTER,
+    WIZ_VULN_FINDINGS,
+)
 from ..config import settings
 from ..enums import FindingCategory, normalize_severity
 from .base import Connector, NormalizedAsset, NormalizedRecord, NormalizedVuln, parse_ts
 
 log = logging.getLogger(__name__)
-
-
-VULN_FINDINGS_QUERY = """
-query VulnerabilityFindings($filterBy: VulnerabilityFindingFilters, $first: Int, $after: String) {
-  vulnerabilityFindings(filterBy: $filterBy, first: $first, after: $after) {
-    nodes {
-      id
-      name
-      CVEDescription
-      CVSSSeverity
-      score
-      hasExploit
-      hasCisaKevExploit
-      epssProbability
-      epssPercentile
-      firstDetectedAt
-      lastDetectedAt
-      resolvedAt
-      status
-      remediation
-      detailedName
-      version
-      fixedVersion
-      detectionMethod
-      link
-      locationPath
-      vendorSeverity
-      vulnerableAsset {
-        ... on VulnerableAssetBase {
-          id
-          name
-          type
-          cloudPlatform
-          subscriptionExternalId
-          subscriptionName
-          region
-          tags
-        }
-        ... on VulnerableAssetVirtualMachine {
-          id
-          name
-          type
-          operatingSystem
-          ipAddresses
-          cloudPlatform
-          subscriptionExternalId
-          subscriptionName
-          region
-          hasLimitedInternetExposure
-          hasHighInternetExposure
-          tags
-        }
-      }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
-
-CONFIG_FINDINGS_QUERY = """
-query ConfigurationFindings($filterBy: ConfigurationFindingFilters, $first: Int, $after: String) {
-  configurationFindings(filterBy: $filterBy, first: $first, after: $after) {
-    nodes {
-      id
-      severity
-      result
-      analyzedAt
-      firstSeenAt
-      remediation
-      rule { id name description shortName remediationInstructions }
-      resource {
-        id
-        providerId
-        name
-        type
-        region
-        subscription { id name externalId cloudProvider }
-        tags { key value }
-      }
-    }
-    pageInfo { hasNextPage endCursor }
-  }
-}
-"""
 
 
 class WizConnector(Connector):
@@ -170,7 +94,7 @@ class WizConnector(Connector):
         except Exception as exc:
             return False, str(exc)
         try:
-            data = self.graphql("query { __typename }", {})
+            data = self.graphql(WIZ_PROBE, {})
         except Exception as exc:
             return False, f"Authenticated, but the GraphQL probe failed: {exc}"
         return True, f"Connected to {self.cfg.api_url}."
@@ -205,11 +129,7 @@ class WizConnector(Connector):
 
     def introspect(self, type_name: str) -> list[str]:
         """List the fields your tenant exposes on a GraphQL type."""
-        data = self.graphql(
-            "query($n:String!){ __type(name:$n){ name fields { name type { name kind "
-            "ofType { name kind } } } } }",
-            {"n": type_name},
-        )
+        data = self.graphql(WIZ_INTROSPECT, {"n": type_name})
         t = data.get("__type")
         if not t:
             return []
@@ -261,8 +181,8 @@ class WizConnector(Connector):
         log.info("Fetching vulnerability findings from Wiz (filter: status OPEN/IN_PROGRESS)")
         count = 0
         try:
-            for node in self._paginate(VULN_FINDINGS_QUERY, "vulnerabilityFindings",
-                                       {"status": ["OPEN", "IN_PROGRESS"]}):
+            for node in self._paginate(WIZ_VULN_FINDINGS, "vulnerabilityFindings",
+                                       WIZ_VULN_DEFAULT_FILTER):
                 rec = self._map_vuln(node)
                 if rec is not None:
                     count += 1
@@ -276,8 +196,8 @@ class WizConnector(Connector):
     def _fetch_config(self) -> Iterator[NormalizedRecord]:
         log.info("Fetching configuration findings from Wiz (filter: result FAIL)")
         count = 0
-        for node in self._paginate(CONFIG_FINDINGS_QUERY, "configurationFindings",
-                                   {"result": ["FAIL"]}):
+        for node in self._paginate(WIZ_CONFIG_FINDINGS, "configurationFindings",
+                                   WIZ_CONFIG_DEFAULT_FILTER):
             rec = self._map_config(node)
             if rec is not None:
                 count += 1
