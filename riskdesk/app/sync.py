@@ -248,6 +248,60 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     return row.id, is_new
 
 
+def run_sync_from_records(db, source: str, records: list[NormalizedRecord],
+                          actor: str = "system") -> dict:
+    """Import pre-mapped NormalizedRecords (e.g. from a file upload)."""
+    run = SyncRun(source=source, triggered_by=actor, status="running")
+    db.add(run)
+    db.commit()
+
+    stats = {"assets": 0, "findings": 0, "new": 0, "closed": 0}
+    new_severity: dict[str, int] = {}
+    asset_cache: dict[tuple[str, str], int] = {}
+    vuln_cache: dict[str, int] = {}
+
+    try:
+        pending = 0
+        for rec in records:
+            asset_id = _upsert_asset(db, source, rec, asset_cache, stats)
+            vuln_id = _upsert_vuln(db, rec, vuln_cache)
+            fid, is_new = _upsert_finding(db, source, rec, asset_id, vuln_id, stats)
+            if is_new:
+                new_severity[rec.severity] = new_severity.get(rec.severity, 0) + 1
+            pending += 1
+            if pending >= BATCH:
+                db.commit()
+                pending = 0
+        db.commit()
+        run.status = "ok"
+    except Exception as exc:
+        db.rollback()
+        run = db.get(SyncRun, run.id)
+        run.status = "error"
+        run.error = f"{type(exc).__name__}: {exc}"
+        log.exception("File import sync failed for %s", source)
+    finally:
+        run = db.get(SyncRun, run.id)
+        run.finished_at = utcnow()
+        run.assets_upserted = stats["assets"]
+        run.findings_upserted = stats["findings"]
+        run.findings_new = stats["new"]
+        run.findings_closed = stats["closed"]
+        run.delta = {"new_by_severity": new_severity}
+        db.add(AuditEvent(
+            actor=actor, action="sync.file_import", entity_type="source",
+            entity_id=source,
+            summary=f"File import: {stats['findings']} findings ({stats['new']} new)",
+        ))
+        db.commit()
+
+    return {
+        "run_id": run.id, "source": source, "status": run.status,
+        "error": run.error, **stats,
+        "new_by_severity": new_severity,
+    }
+
+
 def _mark_stale(db, source: str, run_started: dt.datetime) -> int:
     """Flag open findings this source stopped reporting.
 

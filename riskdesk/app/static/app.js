@@ -151,13 +151,14 @@ function debounce(fn, ms) {
 function switchView(view) {
   state.view = view;
   [...$('tabs').children].forEach((t) => t.classList.toggle('is-active', t.dataset.view === view));
-  ['findings', 'register', 'activity', 'compliance', 'exceptions', 'rules', 'sources', 'settings'].forEach((v) => { $(`view-${v}`).hidden = v !== view; });
+  ['findings', 'register', 'activity', 'compliance', 'exceptions', 'rules', 'sources', 'tickets', 'settings'].forEach((v) => { $(`view-${v}`).hidden = v !== view; });
   if (view === 'register') loadRegister();
   if (view === 'activity') loadActivity();
   if (view === 'compliance') loadCompliance();
   if (view === 'exceptions') loadExceptions();
   if (view === 'rules') loadRules();
   if (view === 'sources') loadSources();
+  if (view === 'tickets') loadTickets();
   if (view === 'settings') loadSettings();
 }
 
@@ -304,6 +305,7 @@ function renderFindings() {
       : `<b>${state.selected.size}</b> selected on this page.`;
     $('selectAllMatching').hidden = !!state.allMatchingIds || r.total <= state.selected.size;
     bar.insertAdjacentElement('beforeend', decideButton());
+    bar.insertAdjacentElement('beforeend', ticketButton());
   } else {
     bar.hidden = true;
   }
@@ -341,6 +343,19 @@ function decideButton() {
   b.style.marginLeft = 'auto';
   b.textContent = `Record a decision on ${(state.allMatchingIds ? state.results.total : state.selected.size).toLocaleString()} findings`;
   b.onclick = () => openDecide([...(state.allMatchingIds || state.selected)]);
+  return b;
+}
+
+function ticketButton() {
+  let b = document.getElementById('bulkTicket');
+  if (b) b.remove();
+  b = document.createElement('button');
+  b.id = 'bulkTicket';
+  b.className = 'btn-ghost';
+  b.style.marginLeft = '8px';
+  const count = state.allMatchingIds ? state.results.total : state.selected.size;
+  b.textContent = `Create ticket for ${count.toLocaleString()} findings`;
+  b.onclick = () => openCreateTicket([...(state.allMatchingIds || state.selected)]);
   return b;
 }
 
@@ -510,7 +525,14 @@ async function openDetail(id) {
 
       ${f.decision_history.length ? `<div class="sec"><h3>Decision history</h3>
         ${f.decision_history.map(historyHtml).join('')}</div>` : ''}
+
+      <div class="sec" id="findingTickets" data-finding-id="${f.id}">
+        <h3>Tickets</h3>
+        <div id="findingTicketList"><span class="na">Loading…</span></div>
+        <button class="btn-ghost" style="margin-top:8px;font-size:12px" onclick="openCreateTicket([${f.id}])">Create ticket</button>
+      </div>
     </div>`;
+  loadFindingTickets(f.id);
 }
 
 function stampHtml(d) {
@@ -2312,6 +2334,278 @@ async function setComplianceTarget(benchmarkId, currentScore) {
     loadCompliance();
   } catch (e) { toast(e.message, true); }
 }
+
+// ---------------------------------------------------------------- tickets
+
+let _ticketFilter = { status: '', q: '' };
+
+async function loadTickets() {
+  const el = $('ticketList');
+  if (!el) return;
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  try {
+    const params = new URLSearchParams();
+    if (_ticketFilter.status) params.set('status', _ticketFilter.status);
+    const tickets = await api(`/api/tickets?${params}`);
+    const filtered = _ticketFilter.q
+      ? tickets.filter(t => (t.summary + t.external_id + (t.assignee||'')).toLowerCase().includes(_ticketFilter.q.toLowerCase()))
+      : tickets;
+    if (!filtered.length) {
+      el.innerHTML = '<div class="empty">No tickets yet. Create one from selected findings or from a finding detail view.</div>';
+      return;
+    }
+    el.innerHTML = filtered.map(ticketRowHtml).join('');
+    el.onclick = (e) => {
+      const row = e.target.closest('.row');
+      if (!row) return;
+      openTicketDetail(Number(row.dataset.id));
+    };
+  } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+function ticketRowHtml(t) {
+  const statusCls = t.status === 'resolved' || t.status === 'closed' ? 'sev-low'
+    : t.status === 'in_progress' ? 'sev-medium' : 'sev-high';
+  return `<div class="row" data-id="${t.id}" style="cursor:pointer">
+    <div class="row-main">
+      <div class="row-id mono" style="min-width:120px">
+        ${t.external_url ? `<a href="${esc(t.external_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(t.external_id)}</a>` : esc(t.external_id)}
+      </div>
+      <div style="flex:1">
+        <div>${esc(t.summary)}</div>
+        <div class="row-meta">${t.finding_count} finding(s) · ${esc(t.severity || '')} · ${esc(t.provider)}</div>
+      </div>
+      <div class="sev ${statusCls}" style="min-width:90px;text-align:center">${esc(t.status.replace(/_/g, ' '))}</div>
+      <div style="min-width:80px;text-align:right;font-size:12px;color:var(--muted)">${fmtDate(t.created_at)}</div>
+    </div>
+  </div>`;
+}
+
+async function openTicketDetail(id) {
+  const el = $('detail');
+  openDrawer(el);
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  const t = await api(`/api/tickets/${id}`);
+
+  el.innerHTML = `
+    <div class="drawer-head">
+      <div>
+        <h2>${t.external_url ? `<a href="${esc(t.external_url)}" target="_blank" rel="noopener">${esc(t.external_id)}</a>` : esc(t.external_id)}</h2>
+        <p>${esc(t.summary)}</p>
+      </div>
+      <button class="x" onclick="closeDrawers()">×</button>
+    </div>
+    <div class="drawer-body">
+      <dl class="kv">
+        <dt>Status</dt><dd><strong>${esc(t.status.replace(/_/g, ' '))}</strong></dd>
+        <dt>Provider</dt><dd>${esc(t.provider)}</dd>
+        <dt>Priority</dt><dd>${esc(t.priority || 'none')}</dd>
+        <dt>Assignee</dt><dd>${esc(t.assignee || 'unassigned')}</dd>
+        <dt>Severity</dt><dd>${esc(t.severity || 'unknown')}</dd>
+        <dt>Findings</dt><dd>${t.finding_count}</dd>
+        <dt>Created</dt><dd>${fmtDate(t.created_at)} by ${esc(t.created_by)}</dd>
+        ${t.resolved_at ? `<dt>Resolved</dt><dd>${fmtDate(t.resolved_at)}</dd>` : ''}
+        ${t.synced_at ? `<dt>Last synced</dt><dd>${fmtDate(t.synced_at)}</dd>` : ''}
+      </dl>
+      ${t.description ? `<div class="sec" style="margin-top:16px"><h3>Description</h3><div class="prose" style="white-space:pre-wrap;font-size:12px">${esc(t.description)}</div></div>` : ''}
+
+      <div class="sec" style="margin-top:16px">
+        <h3>Linked findings</h3>
+        <div style="font-size:12px">${(t.finding_ids || []).map(fid => `<a href="#" onclick="event.preventDefault();closeDrawers();openDetail(${fid})" style="margin-right:8px">Finding #${fid}</a>`).join('')}</div>
+      </div>
+
+      <div class="sec" style="margin-top:16px">
+        <h3>Vulnerability IDs</h3>
+        <div class="mono" style="font-size:12px">${(t.vuln_ids || []).join(', ') || 'none'}</div>
+      </div>
+
+      <div style="margin-top:20px;display:flex;gap:8px">
+        ${t.provider === 'jira' ? `<button class="btn-ghost" onclick="syncTicket(${t.id})">Sync from Jira</button>` : ''}
+        <button class="btn-ghost" onclick="updateTicketStatus(${t.id}, '${t.status}')">Update status</button>
+      </div>
+    </div>`;
+}
+
+async function syncTicket(id) {
+  try {
+    const r = await api(`/api/tickets/${id}/sync`, { method: 'POST' });
+    if (r.ok) { toast('Synced from Jira'); openTicketDetail(id); }
+    else toast(r.error || 'Sync failed', true);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function updateTicketStatus(id, current) {
+  const statuses = ['open', 'in_progress', 'resolved', 'closed', "won't_fix"];
+  const next = prompt(`Update status (current: ${current}).\nOptions: ${statuses.join(', ')}`, current);
+  if (!next || next === current) return;
+  try {
+    await api(`/api/tickets/${id}`, { method: 'PUT', body: JSON.stringify({ status: next }) });
+    toast('Status updated');
+    openTicketDetail(id);
+    if (state.view === 'tickets') loadTickets();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function loadFindingTickets(findingId) {
+  const el = $('findingTicketList');
+  if (!el) return;
+  try {
+    const tickets = await api(`/api/tickets/for-finding/${findingId}`);
+    if (!tickets.length) {
+      el.innerHTML = '<span class="na">No tickets linked to this finding</span>';
+      return;
+    }
+    el.innerHTML = tickets.map(t => `
+      <div style="margin-bottom:6px;font-size:12px">
+        ${t.external_url ? `<a href="${esc(t.external_url)}" target="_blank" rel="noopener">${esc(t.external_id)}</a>` : esc(t.external_id)}
+        <span class="mono">${esc(t.status.replace(/_/g, ' '))}</span>
+        · ${esc(t.summary).slice(0, 80)}
+        ${t.provider === 'jira' ? `<button class="link" style="font-size:11px" onclick="syncTicket(${t.id})">sync</button>` : ''}
+      </div>`).join('');
+  } catch (_) { el.innerHTML = '<span class="na">Could not load tickets</span>'; }
+}
+
+function openCreateTicket(findingIds) {
+  const el = $('decide');
+  openDrawer(el);
+  el.innerHTML = `
+    <div class="drawer-head">
+      <div><h2>Create ticket</h2><p>${findingIds.length} finding(s) selected</p></div>
+      <button class="x" onclick="closeDrawers()">×</button>
+    </div>
+    <div class="drawer-body">
+      <div class="field-group">
+        <label class="micro-label">Provider</label>
+        <select id="ticketProvider" class="field-sm">
+          <option value="jira">Jira (auto-create)</option>
+          <option value="manual">Manual / external</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="micro-label">Summary</label>
+        <input id="ticketSummary" class="field" placeholder="Auto-generated if blank">
+      </div>
+      <div class="field-group">
+        <label class="micro-label">Project key</label>
+        <input id="ticketProject" class="field-sm" placeholder="e.g. VULN">
+      </div>
+      <div class="field-group">
+        <label class="micro-label">Issue type</label>
+        <input id="ticketIssueType" class="field-sm" value="Bug">
+      </div>
+      <div class="field-group">
+        <label class="micro-label">Priority</label>
+        <select id="ticketPriority" class="field-sm">
+          <option value="">Auto (from severity)</option>
+          <option value="P1">P1 - Critical</option>
+          <option value="P2">P2 - High</option>
+          <option value="P3">P3 - Medium</option>
+          <option value="P4">P4 - Low</option>
+        </select>
+      </div>
+      <div id="manualTicketFields" hidden>
+        <div class="field-group">
+          <label class="micro-label">External ID</label>
+          <input id="ticketExtId" class="field-sm" placeholder="e.g. VULN-1234">
+        </div>
+        <div class="field-group">
+          <label class="micro-label">External URL</label>
+          <input id="ticketExtUrl" class="field" placeholder="https://jira.example.com/browse/VULN-1234">
+        </div>
+      </div>
+      <div id="createTicketError" class="hint" style="color:var(--seal);margin-top:8px" hidden></div>
+      <button class="btn btn-seal" style="margin-top:16px" onclick="_submitTicket(${JSON.stringify(findingIds)})">Create ticket</button>
+    </div>`;
+
+  $('ticketProvider').onchange = () => {
+    $('manualTicketFields').hidden = $('ticketProvider').value !== 'manual';
+  };
+}
+
+async function _submitTicket(findingIds) {
+  const provider = $('ticketProvider').value;
+  const payload = {
+    finding_ids: findingIds,
+    provider,
+    summary: $('ticketSummary').value || undefined,
+    project_key: $('ticketProject').value || undefined,
+    issue_type: $('ticketIssueType').value || undefined,
+    priority: $('ticketPriority').value || undefined,
+  };
+  if (provider === 'manual') {
+    payload.external_id = $('ticketExtId').value || undefined;
+    payload.external_url = $('ticketExtUrl').value || undefined;
+  }
+  try {
+    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify(payload) });
+    if (r.ok === false) {
+      $('createTicketError').textContent = r.error;
+      $('createTicketError').hidden = false;
+      return;
+    }
+    toast(`Ticket ${r.external_id} created`);
+    closeDrawers();
+    if (state.view === 'tickets') loadTickets();
+  } catch (e) {
+    $('createTicketError').textContent = e.message;
+    $('createTicketError').hidden = false;
+  }
+}
+
+// --- ticket tab wiring ---
+
+(function wireTicketTab() {
+  const stateButtons = document.querySelectorAll('#ticketState button');
+  stateButtons.forEach(b => b.onclick = () => {
+    stateButtons.forEach(x => x.classList.remove('is-active'));
+    b.classList.add('is-active');
+    _ticketFilter.status = b.dataset.state;
+    loadTickets();
+  });
+  const search = $('ticketSearch');
+  if (search) {
+    let _t;
+    search.oninput = () => { clearTimeout(_t); _t = setTimeout(() => { _ticketFilter.q = search.value; loadTickets(); }, 300); };
+  }
+  const btn = $('newTicketBtn');
+  if (btn) btn.onclick = () => {
+    if (state.selected.size) openCreateTicket([...state.selected]);
+    else toast('Select findings first on the Findings tab, or open a finding detail to create a ticket.', true);
+  };
+})();
+
+// ---------------------------------------------------------------- Wiz file import
+
+(function wireWizImport() {
+  const input = $('wizImportFile');
+  if (!input) return;
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    const status = $('wizImportStatus');
+    status.innerHTML = '<div class="spin">Importing…</div>';
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const r = await api('/api/wiz/import-file', { method: 'POST', body: JSON.stringify(data) });
+      if (r.ok === false) {
+        status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Import failed:</strong> ${esc(r.error)}</div>`;
+        if (r.mapping_errors && r.mapping_errors.length) {
+          status.innerHTML += `<pre style="font-size:11px;max-height:200px;overflow:auto">${esc(JSON.stringify(r.mapping_errors, null, 2))}</pre>`;
+        }
+        return;
+      }
+      status.innerHTML = `<div class="hint" style="color:var(--ink)"><strong>Import successful:</strong>
+        ${r.findings} findings processed, ${r.new} new, ${r.assets} assets.
+        ${r.mapping_errors && r.mapping_errors.length ? `<br>${r.mapping_errors.length} nodes could not be mapped.` : ''}
+      </div>`;
+      toast(`Imported ${r.findings} findings from Wiz export`);
+    } catch (e) {
+      status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Error:</strong> ${esc(e.message)}</div>`;
+    }
+    input.value = '';
+  };
+})();
 
 boot().catch((e) => {
   document.body.innerHTML = `<div class="empty" style="padding-top:120px">

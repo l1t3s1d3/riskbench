@@ -22,6 +22,7 @@
     <button class="tab" data-view="compliance">Compliance</button>
     <button class="tab" data-view="rules">Rules</button>
     <button class="tab" data-view="sources">Sources</button>
+    <button class="tab" data-view="tickets">Tickets</button>
     <button class="tab" data-view="settings">Settings</button>
   </nav>
   <div class="whoami">
@@ -219,6 +220,21 @@
     <div id="syncList" class="rows"></div>
 
     <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Wiz file import</span></div>
+      <div class="toolbar-right">
+        <label class="btn" style="cursor:pointer">
+          Import JSON
+          <input type="file" id="wizImportFile" accept=".json" hidden>
+        </label>
+      </div>
+    </div>
+    <div id="wizImportStatus" style="padding:0 18px 12px">
+      <div class="hint">Upload a Wiz vulnerability export (JSON). Accepts the format from Wiz Reports,
+      the GraphQL query builder output, or a raw <code>{"findings": [...]}</code> array.
+      This bypasses the live API and lets you validate schema mapping before configuring the connector.</div>
+    </div>
+
+    <div class="toolbar">
       <div class="toolbar-left"><span class="count">Wiz GraphQL Query Builder</span></div>
       <div class="toolbar-right">
         <button id="wizIntrospectBtn" class="btn-ghost">Introspect Type</button>
@@ -252,6 +268,28 @@
       </div>
       <pre id="wizQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
     </div>
+  </section>
+</main>
+
+<!-- ============================ TICKETS ============================ -->
+<main id="view-tickets" class="view" hidden>
+  <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left">
+        <div class="seg" id="ticketState">
+          <button data-state="" class="is-active">All</button>
+          <button data-state="open">Open</button>
+          <button data-state="in_progress">In progress</button>
+          <button data-state="resolved">Resolved</button>
+          <button data-state="closed">Closed</button>
+        </div>
+      </div>
+      <div class="toolbar-right">
+        <input id="ticketSearch" type="search" class="field-sm mono" placeholder="Search tickets">
+        <button id="newTicketBtn" class="btn">Create ticket</button>
+      </div>
+    </div>
+    <div id="ticketList" class="rows"></div>
   </section>
 </main>
 
