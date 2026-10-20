@@ -139,8 +139,13 @@ class Finding(Base):
     fix_version = Column(String(256))
 
     first_detected = Column(DateTime, default=utcnow, index=True)
+    # last_seen is the source's own timestamp; last_synced_at is when a RiskDesk
+    # sync last received this finding. Staleness keys off the latter, because
+    # sources report "last updated", which can be months old on a live alert.
     last_seen = Column(DateTime, default=utcnow, index=True)
+    last_synced_at = Column(DateTime, nullable=True, index=True)
     closed_at = Column(DateTime, nullable=True)
+    reopened_count = Column(Integer, default=0, nullable=False)
 
     verified_by = Column(String(256), nullable=True)
     verified_at = Column(DateTime, nullable=True)
@@ -155,6 +160,21 @@ class Finding(Base):
         UniqueConstraint("source", "source_finding_id", name="uq_finding_source"),
         Index("ix_finding_triage", "status", "severity", "source"),
     )
+
+
+class FindingEvent(Base):
+    """One status transition in a finding's lifecycle (fixed, stale, reopened,
+    verified). First detection is not stored here; it is Finding.first_detected."""
+    __tablename__ = "finding_events"
+    id = Column(Integer, primary_key=True)
+    finding_id = Column(Integer, ForeignKey("findings.id"), nullable=False, index=True)
+    ts = Column(DateTime, default=utcnow, nullable=False, index=True)
+    event = Column(String(32), nullable=False, index=True)
+    from_status = Column(String(32))
+    to_status = Column(String(32))
+    actor = Column(String(256), nullable=False)
+    sync_run_id = Column(Integer, ForeignKey("sync_runs.id"), nullable=True)
+    note = Column(String(1024))
 
 
 class Adjudication(Base):
@@ -199,6 +219,9 @@ class Adjudication(Base):
 
     review_due = Column(DateTime, nullable=True, index=True)   # next periodic review
     expires_at = Column(DateTime, nullable=True, index=True)   # decision lapses
+    # A renewal points at the decision it replaces. The predecessor stays in
+    # force until the renewal is approved, so coverage never gaps.
+    supersedes_id = Column(Integer, ForeignKey("adjudications.id"), nullable=True)
 
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)

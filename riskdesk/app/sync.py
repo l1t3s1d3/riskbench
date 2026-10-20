@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select
 
 from .config import settings
 from .connectors.base import NormalizedRecord
@@ -82,12 +83,12 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
     db.commit()
 
     started = utcnow()
-    stats = {"assets": 0, "findings": 0, "new": 0, "closed": 0}
+    stats = {"assets": 0, "findings": 0, "new": 0, "closed": 0, "reopened": 0, "stale": 0}
     new_severity: dict[str, int] = {}      # severity -> count of new findings
     new_ids: list[int] = []                # ids of newly created findings
     asset_cache: dict[tuple[str, str], int] = {}
     vuln_cache: dict[str, int] = {}
-    touched: set[str] = set()
+    stale_skipped_reason = None
 
     try:
         connector = get_connector(source, demo=demo)
@@ -97,15 +98,15 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
                 f"with demo data to explore the interface."
             )
 
+        ctx = _SyncContext(started=started, actor=actor, run_id=run.id)
         pending = 0
         for rec in connector.fetch(limit=limit):
             asset_id = _upsert_asset(db, source, rec, asset_cache, stats)
             vuln_id = _upsert_vuln(db, rec, vuln_cache)
-            fid, is_new = _upsert_finding(db, source, rec, asset_id, vuln_id, stats)
+            fid, is_new = _upsert_finding(db, source, rec, asset_id, vuln_id, stats, ctx)
             if is_new:
                 new_severity[rec.severity] = new_severity.get(rec.severity, 0) + 1
                 new_ids.append(fid)
-            touched.add(rec.source_finding_id)
             pending += 1
             if pending >= BATCH:
                 db.commit()
@@ -113,7 +114,17 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
                 pending = 0
         db.commit()
 
-        stats["closed"] = _mark_stale(db, source, started)
+        # Only a complete pull can say what the source stopped reporting.
+        if limit:
+            stale_skipped_reason = f"partial sync (limit={limit})"
+        elif demo:
+            stale_skipped_reason = "demo data"
+        else:
+            skipped = set(getattr(connector, "skipped_categories", set()))
+            stats["stale"] = _mark_stale(db, source, started, ctx, exclude_categories=skipped)
+            stats["closed"] += stats["stale"]
+            if skipped:
+                stale_skipped_reason = f"not read this run: {', '.join(sorted(skipped))}"
         db.commit()
 
         run.status = "ok"
@@ -133,24 +144,29 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
         run.delta = {
             "new_by_severity": new_severity,
             "new_ids_sample": new_ids[:500],
+            "reopened": stats["reopened"],
+            "stale": stats["stale"],
+            "stale_check_skipped": stale_skipped_reason,
         }
         db.add(AuditEvent(
             actor=actor, action="sync", entity_type="source", entity_id=source,
             summary=(f"Sync {run.status}: {stats['findings']} findings "
-                     f"({stats['new']} new, {stats['closed']} closed)"
+                     f"({stats['new']} new, {stats['closed']} closed, "
+                     f"{stats['reopened']} reopened)"
                      + (" [demo data]" if demo else "")),
             detail={**stats, "demo": demo, "error": run.error,
-                    "new_by_severity": new_severity},
+                    "new_by_severity": new_severity,
+                    "stale_check_skipped": stale_skipped_reason},
         ))
         db.commit()
 
-        # Auto-assignment on new findings
+        # Auto-assignment, for findings this run created only.
         assign_stats = None
         if run.status == "ok" and new_ids and not demo:
             try:
                 from .assignment import evaluate_rules
                 assign_stats = evaluate_rules(
-                    db, source=source, actor=actor
+                    db, source=source, finding_ids=new_ids, actor=actor
                 )
             except Exception:
                 log.exception("Auto-assignment after %s sync failed", source)
@@ -245,8 +261,18 @@ def _upsert_vuln(db, rec: NormalizedRecord, cache: dict) -> int:
     return row.id
 
 
+@dataclass
+class _SyncContext:
+    started: dt.datetime
+    actor: str
+    run_id: int | None
+
+
 def _upsert_finding(db, source: str, rec: NormalizedRecord,
-                    asset_id: int, vuln_id: int, stats: dict) -> tuple[int, bool]:
+                    asset_id: int, vuln_id: int, stats: dict,
+                    ctx: _SyncContext) -> tuple[int, bool]:
+    from .lifecycle import apply_reported_status
+
     row = db.execute(
         select(Finding).where(Finding.source == source,
                               Finding.source_finding_id == rec.source_finding_id)
@@ -254,14 +280,14 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     is_new = row is None
     if is_new:
         row = Finding(source=source, source_finding_id=rec.source_finding_id,
-                      first_detected=rec.first_detected or utcnow())
+                      first_detected=rec.first_detected or ctx.started,
+                      reopened_count=0)
         db.add(row)
         stats["new"] += 1
 
     row.asset_id = asset_id
     row.vuln_id = vuln_id
     row.category = rec.category
-    row.status = rec.status
     row.component = rec.component
     row.component_version = rec.component_version
     row.component_key = rec.component_key
@@ -270,13 +296,20 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     row.severity = rec.severity
     row.fix_available = rec.fix_available
     row.fix_version = rec.fix_version
-    row.last_seen = rec.last_seen or utcnow()
+    row.last_seen = rec.last_seen or ctx.started
+    row.last_synced_at = ctx.started
     row.source_url = rec.source_url
     row.raw = rec.raw
-    if rec.status == "fixed" and row.closed_at is None:
-        row.closed_at = utcnow()
-    elif rec.status == "open":
-        row.closed_at = None
+    db.flush()  # events need row.id
+
+    transition = apply_reported_status(
+        db, row, rec.status, is_new, utcnow(),
+        actor=f"sync:{source}", sync_run_id=ctx.run_id,
+    )
+    if transition == "fixed":
+        stats["closed"] += 1
+    elif transition == "reopened":
+        stats["reopened"] += 1
 
     stats["findings"] += 1
     db.flush()
@@ -294,17 +327,18 @@ def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord
     db.add(run)
     db.commit()
 
-    stats = {"assets": 0, "findings": 0, "new": 0, "closed": 0}
+    stats = {"assets": 0, "findings": 0, "new": 0, "closed": 0, "reopened": 0}
     new_severity: dict[str, int] = {}
     asset_cache: dict[tuple[str, str], int] = {}
     vuln_cache: dict[str, int] = {}
+    ctx = _SyncContext(started=utcnow(), actor=actor, run_id=run.id)
 
     try:
         pending = 0
         for rec in records:
             asset_id = _upsert_asset(db, source, rec, asset_cache, stats)
             vuln_id = _upsert_vuln(db, rec, vuln_cache)
-            fid, is_new = _upsert_finding(db, source, rec, asset_id, vuln_id, stats)
+            fid, is_new = _upsert_finding(db, source, rec, asset_id, vuln_id, stats, ctx)
             if is_new:
                 new_severity[rec.severity] = new_severity.get(rec.severity, 0) + 1
             pending += 1
@@ -343,17 +377,31 @@ def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord
     return result
 
 
-def _mark_stale(db, source: str, run_started: dt.datetime) -> int:
-    """Flag open findings this source stopped reporting.
+def _mark_stale(db, source: str, run_started: dt.datetime, ctx: _SyncContext,
+                exclude_categories: set[str] | None = None) -> int:
+    """Close open findings this source stopped reporting, as `stale`.
 
-    Deliberately conservative: a finding must go unreported for the full grace
-    window before it changes state, so one truncated sync does not silently
-    close a backlog.
+    Deliberately conservative: a finding must go unreported by RiskDesk syncs
+    for the full grace window before it changes state, so one truncated sync
+    does not silently close a backlog. Measured against last_synced_at, not the
+    source's own timestamp (rows from before that column existed fall back to
+    last_seen until their next sync).
     """
+    from .lifecycle import record_event
+
     cutoff = run_started - dt.timedelta(days=settings.stale_after_days)
-    result = db.execute(
-        update(Finding)
-        .where(Finding.source == source, Finding.status == "open", Finding.last_seen < cutoff)
-        .values(status="stale")
+    stmt = select(Finding).where(
+        Finding.source == source, Finding.status == "open",
+        func.coalesce(Finding.last_synced_at, Finding.last_seen) < cutoff,
     )
-    return result.rowcount or 0
+    if exclude_categories:
+        stmt = stmt.where(Finding.category.notin_(exclude_categories))
+    now = utcnow()
+    rows = db.execute(stmt).scalars().all()
+    for f in rows:
+        f.status = "stale"
+        f.closed_at = now
+        record_event(db, f, "stale", "stale", f"sync:{source}", from_status="open",
+                     sync_run_id=ctx.run_id, ts=now,
+                     note=f"Not reported for {settings.stale_after_days}+ days")
+    return len(rows)

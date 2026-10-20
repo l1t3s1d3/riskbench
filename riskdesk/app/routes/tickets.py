@@ -170,11 +170,12 @@ def update_ticket(ticket_id: int, request: Request, body: dict = Body(...),
     if not t:
         raise HTTPException(404)
     actor = current_user(request)
-    for field in ("status", "assignee", "priority", "external_id", "external_url"):
+    from ..ticket_sync import set_ticket_status
+    for field in ("assignee", "priority", "external_id", "external_url"):
         if field in body:
             setattr(t, field, body[field])
-    if body.get("status") in ("resolved", "closed"):
-        t.resolved_at = dt.datetime.now(dt.timezone.utc)
+    if "status" in body:
+        set_ticket_status(db, t, body["status"], actor)
     db.add(AuditEvent(
         actor=actor, action="ticket.update",
         entity_type="ticket", entity_id=t.external_id,
@@ -198,15 +199,8 @@ def sync_ticket_status(ticket_id: int, request: Request, db=Depends(get_session)
     if not jira_config.get("url") or not jira_config.get("api_token"):
         raise HTTPException(422, "Jira not configured")
     try:
-        issue = _fetch_jira_issue(jira_config, t.external_id)
-        fields = issue.get("fields", {})
-        t.status = (fields.get("status", {}).get("name", "open")).lower().replace(" ", "_")
-        t.assignee = (fields.get("assignee") or {}).get("displayName")
-        t.priority = (fields.get("priority") or {}).get("name")
-        resolution = fields.get("resolution")
-        if resolution and not t.resolved_at:
-            t.resolved_at = dt.datetime.now(dt.timezone.utc)
-        t.synced_at = dt.datetime.now(dt.timezone.utc)
+        from ..ticket_sync import sync_one
+        sync_one(db, t, jira_config, actor=current_user(request))
         db.commit()
         return {"ok": True, "ticket": _serialize_ticket(t)}
     except Exception as exc:
@@ -250,22 +244,6 @@ def _create_jira_issue(config: dict, summary: str, description: str, *,
         raise RuntimeError(f"Jira {r.status_code}: {r.text[:300]}")
     data = r.json()
     return {"key": data["key"], "url": f"{url}/browse/{data['key']}"}
-
-
-def _fetch_jira_issue(config: dict, issue_key: str) -> dict:
-    import re, httpx, base64
-    if not re.match(r'^[A-Z][A-Z0-9_]+-\d+$', issue_key):
-        raise ValueError(f"Invalid Jira issue key: {issue_key!r}")
-    auth = base64.b64encode(f"{config['email']}:{config['api_token']}".encode()).decode()
-    url = config["url"].rstrip("/")
-    r = httpx.get(
-        f"{url}/rest/api/2/issue/{issue_key}",
-        headers={"Authorization": f"Basic {auth}"},
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"Jira {r.status_code}: {r.text[:300]}")
-    return r.json()
 
 
 def _auto_summary(findings) -> str:

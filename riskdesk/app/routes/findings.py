@@ -5,14 +5,17 @@ import csv
 import datetime as dt
 import io
 
-from fastapi import APIRouter, Depends, Query, Request, UploadFile, File
+from fastapi import APIRouter, Body, Depends, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
 from ..config import settings
 from ..db import get_session
-from ..enums import Disposition, FindingCategory, ScopeType, Severity, DISPOSITION_LABELS
+from ..enums import (
+    DISPOSITION_LABELS, VERIFIABLE_STATUSES, Disposition, FindingCategory, ScopeType, Severity,
+)
+from ..lifecycle import finding_timeline, lifecycle_metrics, record_event
 from ..models import (
     Adjudication, AdjudicationApplication, Asset, Finding, SyncRun, Vuln,
 )
@@ -20,7 +23,7 @@ from ..queries import (
     FindingFilter, _serialize_adj, build_pending_map, build_resolution_map,
     facets as get_facets, search, serialize_finding,
 )
-from ..risk import compute_risk, default_expiry, default_review_due
+from ..risk import compute_risk, sla_status
 from ..schemas import (
     AuditPageOut, BulkAdjudicationOut, DashboardOut,
     FindingDetailOut, FindingListOut, FindingIdsOut,
@@ -139,28 +142,54 @@ def get_finding(finding_id: int, db=Depends(get_session)):
         .order_by(Adjudication.requested_at.desc())
     ).unique().scalars().all()
     payload["decision_history"] = [_serialize_adj(a) for a in history]
+    payload["timeline"] = finding_timeline(db, obj)
     payload["raw"] = obj.raw
     return payload
 
 
+@router.get("/findings/{finding_id}/timeline")
+def get_finding_timeline(finding_id: int, db=Depends(get_session)):
+    from fastapi import HTTPException
+    obj = db.get(Finding, finding_id)
+    if obj is None:
+        raise HTTPException(404, "No such finding.")
+    return {"finding_id": finding_id, "status": obj.status, "events": finding_timeline(db, obj)}
+
+
+@router.get("/lifecycle/metrics")
+def get_lifecycle_metrics(days: int = Query(90, ge=1, le=730), db=Depends(get_session)):
+    """Remediation flow over a window: opened vs closed, time to close, SLA
+    attainment at closure, reopens, verification backlog, ticket drift."""
+    return lifecycle_metrics(db, days=days)
+
+
 @router.post("/findings/{finding_id}/verify", response_model=VerifyOut)
-def verify_finding(finding_id: int, request: Request, db=Depends(get_session)):
-    """Mark a fixed finding as verified fixed."""
+def verify_finding(finding_id: int, request: Request, body: dict | None = Body(default=None),
+                   db=Depends(get_session)):
+    """Confirm a closed finding (fixed by the source, or stale) is really fixed."""
     from fastapi import HTTPException
     from ..models import AuditEvent
     obj = db.get(Finding, finding_id)
     if obj is None:
         raise HTTPException(404, "No such finding.")
-    if obj.status != "fixed":
-        raise HTTPException(422, f"Finding must be in 'fixed' status to verify (currently '{obj.status}').")
+    if obj.status not in VERIFIABLE_STATUSES:
+        raise HTTPException(
+            422, f"Only fixed or stale findings can be verified (currently '{obj.status}').")
     actor = current_user(request)
+    note = ((body or {}).get("note") or "").strip() or None
+    now = dt.datetime.now(dt.timezone.utc)
+    prev = obj.status
     obj.status = "verified_fixed"
     obj.verified_by = actor
-    obj.verified_at = dt.datetime.now(dt.timezone.utc)
+    obj.verified_at = now
+    if obj.closed_at is None:
+        obj.closed_at = now
+    record_event(db, obj, "verified", "verified_fixed", actor, from_status=prev, ts=now, note=note)
     db.add(AuditEvent(
         actor=actor, action="finding.verify",
         entity_type="finding", entity_id=str(finding_id),
-        summary=f"Finding #{finding_id} verified as fixed",
+        summary=f"Finding #{finding_id} verified as fixed (was {prev})",
+        detail={"note": note},
     ))
     db.commit()
     return {"ok": True, "finding_id": finding_id, "status": "verified_fixed"}
@@ -195,15 +224,8 @@ def dashboard(db=Depends(get_session)):
         by_disposition[disp] = by_disposition.get(disp, 0) + 1
         if kev:
             kev_open += 1
-        if disp not in ("accept_risk", "false_positive"):
-            fd = first_detected or now
-            if fd.tzinfo is None:
-                fd = fd.replace(tzinfo=dt.timezone.utc)
-            days = settings.policy.remediation_sla_days.get(eff, 90)
-            if kev:
-                days = min(days, settings.policy.kev_sla_days)
-            if fd + dt.timedelta(days=days) < now:
-                overdue += 1
+        if sla_status(first_detected, eff, bool(kev), adj, now)[1]:
+            overdue += 1
 
     pending = db.execute(
         select(func.count()).select_from(Adjudication)
@@ -215,6 +237,7 @@ def dashboard(db=Depends(get_session)):
         select(func.count()).select_from(Adjudication)
         .where(Adjudication.state == "approved",
                Adjudication.expires_at.isnot(None),
+               Adjudication.expires_at > now,
                Adjudication.expires_at <= horizon)
     ).scalar() or 0
     review_due = db.execute(

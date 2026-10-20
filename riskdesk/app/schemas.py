@@ -85,6 +85,7 @@ class DecisionOut(BaseModel):
     expires_at: str | None = None
     applied_count: int = 0
     scope_filter: dict | None = None
+    supersedes_id: int | None = None
 
 
 # --- Finding responses ------------------------------------------------------
@@ -103,6 +104,11 @@ class FindingOut(BaseModel):
     fix_version: str | None = None
     first_detected: str | None = None
     last_seen: str | None = None
+    last_synced_at: str | None = None
+    closed_at: str | None = None
+    reopened_count: int = 0
+    verified_by: str | None = None
+    verified_at: str | None = None
     source_url: str | None = None
     source_severity: str | None = None
     asset: AssetOut

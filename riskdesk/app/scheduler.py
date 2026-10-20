@@ -71,10 +71,32 @@ def _tick():
             if _is_due(sched, now):
                 _run_scheduled(db, sched, now)
 
+        _maybe_expire_decisions(db, now)
         _maybe_sync_tickets(db, now)
         _maybe_check_sla(db, now)
     finally:
         db.close()
+
+
+_last_expiry_check: dt.datetime | None = None
+EXPIRY_CHECK_INTERVAL_HOURS = 1
+
+
+def _maybe_expire_decisions(db, now: dt.datetime):
+    """Move lapsed approvals to `expired` so risk returns without a restart."""
+    global _last_expiry_check
+    if _last_expiry_check is not None:
+        elapsed = (now - _last_expiry_check).total_seconds() / 3600
+        if elapsed < EXPIRY_CHECK_INTERVAL_HOURS:
+            return
+    try:
+        from .adjudication import expire_lapsed
+        n = expire_lapsed(db, actor="scheduler")
+        _last_expiry_check = now
+        if n:
+            log.info("Expired %d lapsed decisions", n)
+    except Exception:
+        log.exception("Scheduled decision expiry failed")
 
 
 _last_ticket_sync: dt.datetime | None = None
@@ -160,7 +182,6 @@ def _compute_next(sched: SyncSchedule, now: dt.datetime) -> dt.datetime:
 def _run_scheduled(db, sched: SyncSchedule, now: dt.datetime):
     """Execute one scheduled sync."""
     from .sync import get_connector, run_sync
-    from .assignment import evaluate_rules
 
     source = sched.source
     connector = get_connector(source)
@@ -184,19 +205,7 @@ def _run_scheduled(db, sched: SyncSchedule, now: dt.datetime):
 
         sched.last_status = result.get("status", "error")
         sched.last_error = result.get("error")
-
-        # Run assignment rules against new findings
-        if result.get("status") == "ok" and result.get("new", 0) > 0:
-            try:
-                assign_result = evaluate_rules(
-                    db, source=source,
-                    actor=f"scheduler:{sched.created_by or 'system'}"
-                )
-                log.info("Auto-assignment after %s sync: %d assigned",
-                         source, assign_result.get("assigned", 0))
-            except Exception:
-                log.exception("Auto-assignment failed after %s sync", source)
-
+        # run_sync already applied assignment rules to the new findings.
         log.info("Scheduled sync for %s finished: %s", source, sched.last_status)
     except Exception as exc:
         sched.last_status = "error"

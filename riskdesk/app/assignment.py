@@ -82,10 +82,9 @@ def evaluate_rules(db, source: str | None = None,
 
     for f in findings:
         existing = resolution.get(f.id)
-        # Risk decisions (accept, adjust, false positive) outrank assignment rules
-        if existing and existing.disposition not in (
-            d.value for d in ROUTING_DISPOSITIONS
-        ):
+        # Already governed: risk decisions outrank rules, and an existing routing
+        # decision (from a rule or a person) is not re-created on every sync.
+        if existing is not None:
             stats["skipped_existing"] += 1
             continue
 
@@ -183,10 +182,6 @@ def _apply_rule(db, finding: Finding, rule: AssignmentRule,
                 actor: str, existing_adj) -> None:
     """Set assigned_to on the finding and optionally create a routing decision."""
     from .adjudication import create_decisions, PolicyError
-
-    # If there is already a routing decision from a *different* rule or manual
-    # action, don't pile on -- just update the assignment field.
-    finding.assigned_to_rule = rule.id if hasattr(finding, 'assigned_to_rule') else None
 
     # Create a routing decision so it shows in the register
     disp = rule.disposition or Disposition.FIX_IMMEDIATELY.value

@@ -6,7 +6,7 @@ const state = {
   view: 'findings',
   page: 1,
   pageSize: 50,
-  filter: { source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: 'risk' },
+  filter: { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: 'risk' },
   results: null,
   selected: new Set(),
   allMatchingIds: null,     // set when "select all matching" is used
@@ -55,6 +55,16 @@ const DISP_SHORT = {
   accept_risk: 'Accepted', adjust_risk: 'Adjusted', false_positive: 'Not affected',
 };
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const STATUS_ORDER = ['open', 'fixed', 'stale', 'verified_fixed', 'suppressed_at_source'];
+const STATUS_LABEL = {
+  open: 'Open', fixed: 'Fixed — awaiting verification',
+  stale: 'Stale — no longer reported', verified_fixed: 'Verified fixed',
+  suppressed_at_source: 'Suppressed at source',
+};
+const STATUS_SHORT = {
+  fixed: 'Fixed', stale: 'Stale', verified_fixed: 'Verified', suppressed_at_source: 'Suppressed',
+};
+const isClosed = (s) => s && s !== 'open';
 
 function dispLabel(v) {
   const m = (state.meta?.dispositions || []).find((d) => d.value === v);
@@ -67,6 +77,10 @@ function fmtDate(iso) {
 function daysFrom(iso) {
   if (!iso) return null;
   return Math.round((Date.now() - new Date(iso).getTime()) / 86400000);
+}
+function daysBetween(fromIso, toIso) {
+  if (!fromIso || !toIso) return null;
+  return Math.round((new Date(toIso).getTime() - new Date(fromIso).getTime()) / 86400000);
 }
 function daysUntil(iso) {
   if (!iso) return null;
@@ -173,6 +187,7 @@ function refresh() {
 
 function filterParams() {
   const p = new URLSearchParams();
+  (state.filter.status.length ? state.filter.status : STATUS_ORDER).forEach((v) => p.append('status', v));
   state.filter.source.forEach((v) => p.append('source', v));
   state.filter.severity.forEach((v) => p.append('severity', v));
   state.filter.category.forEach((v) => p.append('category', v));
@@ -225,7 +240,7 @@ function renderStats(d) {
 
 function applyQuick(kind) {
   if (kind === 'clear') {
-    state.filter = { source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
+    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
     $('qInput').value = '';
   } else {
     state.filter.quick = state.filter.quick === kind ? null : kind;
@@ -250,6 +265,12 @@ function renderFacets(fac) {
     $(elId).innerHTML = `<div class="micro-label">${title}</div>${rows || '<div class="hint">Nothing matches.</div>'}`;
   };
 
+  const statusCounts = fac.status || {};
+  const statusEntries = STATUS_ORDER
+    .filter((s) => s === 'open' || statusCounts[s] || state.filter.status.includes(s))
+    .map((s) => [s, statusCounts[s] || 0]);
+  block('facetStatus', 'Lifecycle status', 'status', statusEntries, (v) => STATUS_LABEL[v] || v);
+
   const sevEntries = SEV_ORDER.filter((s) => fac.severity[s]).map((s) => [s, fac.severity[s]]);
   block('facetSeverity', 'Effective severity', 'severity', sevEntries,
     (v) => v[0].toUpperCase() + v.slice(1), (v) => gauge(v));
@@ -270,7 +291,7 @@ function renderFacets(fac) {
       code_scanning: 'Source code', secret: 'Exposed secret',
     }[v] || v));
 
-  ['facetSeverity', 'facetSource', 'facetDisposition', 'facetCategory'].forEach((id) => {
+  ['facetStatus', 'facetSeverity', 'facetSource', 'facetDisposition', 'facetCategory'].forEach((id) => {
     $(id).onclick = (e) => {
       const f = e.target.closest('.facet');
       if (!f) return;
@@ -362,8 +383,11 @@ function ticketButton() {
 function rowHtml(f) {
   const d = f.decision;
   const sev = f.risk.effective_severity;
-  const age = daysFrom(f.first_detected);
+  const closed = isClosed(f.status);
+  const age = closed ? daysBetween(f.first_detected, f.closed_at) : daysFrom(f.first_detected);
   const tags = [];
+  if (closed) tags.push(`<span class="tag tag-closed">${esc(STATUS_SHORT[f.status] || f.status)}</span>`);
+  if (f.reopened_count) tags.push(`<span class="tag tag-reopened">Reopened${f.reopened_count > 1 ? ' ×' + f.reopened_count : ''}</span>`);
   if (f.vuln.kev) tags.push('<span class="tag tag-kev">KEV</span>');
   if (f.risk.sla_overdue) tags.push('<span class="tag tag-overdue">Past SLA</span>');
   if (f.has_pending && !d) tags.push('<span class="tag tag-pending">Awaiting approval</span>');
@@ -387,7 +411,7 @@ function rowHtml(f) {
         <span>${sevCell}</span>
         <span>${esc(f.source)}</span>
         ${f.component ? `<span>${esc(f.component)}${f.component_version ? ' ' + esc(f.component_version) : ''}</span>` : ''}
-        ${age !== null ? `<span>${age}d open</span>` : ''}
+        ${age !== null ? `<span>${closed ? `closed after ${age}d` : `${age}d open`}</span>` : ''}
         ${f.fix_available ? '<span>fix published</span>' : ''}
       </div>
     </div>
@@ -526,15 +550,7 @@ async function openDetail(id) {
       ${f.decision_history.length ? `<div class="sec"><h3>Decision history</h3>
         ${f.decision_history.map(historyHtml).join('')}</div>` : ''}
 
-      ${f.status === 'fixed' ? `<div class="sec">
-        <h3>Verification</h3>
-        <p style="margin-bottom:8px">This finding has been marked as fixed. Verify the fix is effective:</p>
-        <button class="btn btn-seal" onclick="verifyFinding(${f.id})">Verify fix</button>
-      </div>` : ''}
-      ${f.status === 'verified_fixed' ? `<div class="sec">
-        <h3>Verification</h3>
-        <p class="ok-text" style="color:var(--green,#22863a)">Verified fixed${f.verified_by ? ' by ' + esc(f.verified_by) : ''}${f.verified_at ? ' on ' + fmtDate(f.verified_at) : ''}</p>
-      </div>` : ''}
+      ${lifecycleHtml(f)}
 
       <div class="sec" id="findingTickets" data-finding-id="${f.id}">
         <h3>Tickets</h3>
@@ -543,6 +559,42 @@ async function openDetail(id) {
       </div>
     </div>`;
   loadFindingTickets(f.id);
+}
+
+function lifecycleHtml(f) {
+  const kv = (label, value) => value === null || value === undefined || value === ''
+    ? `<dt>${label}</dt><dd class="na">not recorded</dd>` : `<dt>${label}</dt><dd>${esc(value)}</dd>`;
+  const ageDays = daysBetween(f.first_detected, f.closed_at);
+  const closedNote = f.closed_at
+    ? `${fmtDate(f.closed_at)}${ageDays !== null ? ` (${ageDays} days after detection${
+        f.risk.sla_due ? (new Date(f.closed_at) <= new Date(f.risk.sla_due) ? ', within SLA' : ', after SLA') : ''})` : ''}`
+    : null;
+  let action = '';
+  if (f.status === 'fixed' || f.status === 'stale') {
+    action = `<p class="hint" style="margin:10px 0 8px">${f.status === 'stale'
+      ? 'The source stopped reporting this finding, so it is presumed remediated. Confirm the fix before treating it as closed.'
+      : 'The source reports this resolved. Confirm the fix is effective.'}</p>
+      <button class="btn btn-seal" onclick="verifyFinding(${f.id})">Verify fix</button>`;
+  } else if (f.status === 'verified_fixed') {
+    action = `<p style="margin-top:10px">Verified fixed${f.verified_by ? ' by ' + esc(f.verified_by) : ''}${f.verified_at ? ' on ' + fmtDate(f.verified_at) : ''}.</p>`;
+  }
+  const events = f.timeline || [];
+  const timeline = events.length ? `<ul class="timeline" style="margin-top:14px">${events.map((e) => `
+      <li class="tl-item k-${esc(e.kind)} e-${esc(e.event)}">
+        ${esc(e.summary)}
+        <span class="tl-meta">${fmtDate(e.ts)} · ${esc(e.kind)}${e.actor ? ' · ' + esc(e.actor) : ''}${e.note && e.kind === 'status' && e.event !== 'verified' ? ' · ' + esc(e.note) : ''}</span>
+      </li>`).join('')}</ul>` : '';
+  return `<div class="sec">
+    <h3>Lifecycle</h3>
+    <dl class="kv">
+      ${kv('Status', STATUS_LABEL[f.status] || f.status)}
+      ${kv('Closed', closedNote)}
+      ${kv('Times reopened', String(f.reopened_count || 0))}
+      ${kv('Last reported by source', f.last_synced_at ? fmtDate(f.last_synced_at) : null)}
+    </dl>
+    ${action}
+    ${timeline}
+  </div>`;
 }
 
 function stampHtml(d) {
@@ -932,7 +984,9 @@ async function openRegisterDetail(id) {
 // ---------------------------------------------------------------- activity
 
 async function loadActivity() {
-  const rows = await api('/api/audit?limit=300');
+  $('lcWindow').onchange = loadLifecycleMetrics;
+  loadLifecycleMetrics();
+  const rows = (await api('/api/audit?limit=300')).events || [];
   $('auditList').innerHTML = rows.length ? rows.map((e) => `
     <div class="row" style="grid-template-columns:30px 1fr 140px 150px;cursor:default">
       <div class="edge sev-low"></div>
@@ -943,6 +997,49 @@ async function loadActivity() {
       <div class="row-asset">${esc(e.actor)}</div>
       <div class="row-asset">${new Date(e.ts).toLocaleString()}</div>
     </div>`).join('') : '<div class="empty"><b>Nothing recorded yet.</b></div>';
+}
+
+async function loadLifecycleMetrics() {
+  const el = $('lifecycleMetrics');
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  let m;
+  try { m = await api(`/api/lifecycle/metrics?days=${$('lcWindow').value}`); }
+  catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const n = (v, suffix = '') => (v === null || v === undefined ? '—' : `${v.toLocaleString()}${suffix}`);
+  const net = m.net_change > 0 ? `+${m.net_change}` : String(m.net_change);
+  const tiles = [
+    ['Opened', n(m.opened_in_window), '', null],
+    ['Closed', n(m.closed_in_window), '', null],
+    ['Net backlog change', net, m.net_change > 0 ? 'is-notice' : '', null],
+    ['Mean days to close', n(m.mttr_days), '', null],
+    ['Closed within SLA', n(m.closed_within_sla_pct, '%'), m.closed_within_sla_pct !== null && m.closed_within_sla_pct < 80 ? 'is-notice' : '', null],
+    ['Reopened', n(m.reopened_in_window), m.reopened_in_window ? 'is-seal' : '', null],
+    ['Awaiting verification', n(m.awaiting_verification), '', 'fixed,stale'],
+    ['Tickets out of step', n(m.tickets.resolved_but_findings_open + m.tickets.open_but_findings_closed), '', null],
+  ];
+  const sevRows = SEV_ORDER.filter((s) => m.by_severity[s]).map((s) => {
+    const b = m.by_severity[s];
+    return `<tr><td>${gauge(s)} ${esc(s)}</td><td>${b.closed}</td><td>${b.mttr_days}</td>
+      <td>${b.median_days}</td><td>${b.closed_within_sla_pct === null ? '—' : b.closed_within_sla_pct + '%'}</td></tr>`;
+  }).join('');
+  const drift = m.tickets;
+  const driftList = (rows, label) => rows.length ? `<div class="hint" style="margin:0 18px 6px">${label}:
+    ${rows.map((t) => `<span class="mono">${esc(t.external_id)}</span>`).join(', ')}</div>` : '';
+  el.innerHTML = `
+    <div class="lc-grid">${tiles.map(([label, val, cls, status]) =>
+      `<div class="stat ${cls} ${status ? 'is-clickable' : ''}" ${status ? `data-status="${status}"` : ''}><b>${val}</b><span>${label}</span></div>`).join('')}</div>
+    ${sevRows ? `<table class="lc-table"><thead><tr><th>Severity</th><th>Closed</th><th>Mean days</th><th>Median days</th><th>Within SLA</th></tr></thead><tbody>${sevRows}</tbody></table>`
+      : '<div class="hint" style="margin:0 18px 18px">Nothing closed in this window yet.</div>'}
+    ${driftList(drift.resolved_but_findings_open_sample, 'Tickets resolved while the scanner still reports the finding')}
+    ${driftList(drift.open_but_findings_closed_sample, 'Tickets still open although every linked finding is closed')}`;
+  el.onclick = (e) => {
+    const s = e.target.closest('[data-status]');
+    if (!s) return;
+    state.filter.status = s.dataset.status.split(',');
+    state.page = 1;
+    switchView('findings');
+    loadFindings();
+  };
 }
 
 // ---------------------------------------------------------------- sources
@@ -1872,6 +1969,7 @@ async function loadSavedViews() {
 function applySavedView(v) {
   const f = v.filters || {};
   state.filter = {
+    status: f.status || f.statuses || ['open'],
     source: f.sources || [], severity: f.severities || [], category: f.categories || [],
     disposition: f.dispositions || [], quick: f.quick || null,
     q: f.q || '', sort: f.sort || 'risk',
@@ -2642,9 +2740,10 @@ async function updateTicketStatus(id, current) {
 }
 
 async function verifyFinding(id) {
-  if (!confirm('Mark this finding as verified fixed?')) return;
+  const note = prompt('Mark this finding as verified fixed.\nHow was the fix confirmed? (optional)', '');
+  if (note === null) return;
   try {
-    await api(`/api/findings/${id}/verify`, { method: 'POST' });
+    await api(`/api/findings/${id}/verify`, { method: 'POST', body: JSON.stringify({ note }) });
     toast('Finding verified as fixed');
     openDetail(id);
   } catch (e) { toast(e.message || 'Verification failed', true); }

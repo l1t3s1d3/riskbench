@@ -39,6 +39,18 @@ class FindingStatus(str, Enum):
     STALE = "stale"          # not seen in the last N syncs
 
 
+# Statuses that end the remediation clock. Stale counts as closed (presumed
+# remediated: the source stopped reporting it) but is still verifiable, and
+# reopens if the source reports it again.
+CLOSED_STATUSES = {
+    FindingStatus.FIXED.value,
+    FindingStatus.VERIFIED_FIXED.value,
+    FindingStatus.STALE.value,
+    FindingStatus.SUPPRESSED_AT_SOURCE.value,
+}
+VERIFIABLE_STATUSES = {FindingStatus.FIXED.value, FindingStatus.STALE.value}
+
+
 class Disposition(str, Enum):
     """Mirrors the five-disposition adjudication framework, plus a
     factual-correction disposition that is deliberately NOT a risk decision."""

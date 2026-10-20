@@ -10,7 +10,6 @@ Configure with environment variables:
 """
 from __future__ import annotations
 
-import datetime as dt
 import logging
 import smtplib
 from email.message import EmailMessage
@@ -23,6 +22,7 @@ from .config import settings
 from .models import Asset, Finding, Vuln, utcnow
 from .queries import build_resolution_map
 from .enums import Disposition
+from .risk import compute_risk, sla_status
 
 log = logging.getLogger(__name__)
 
@@ -53,20 +53,12 @@ def check_sla_breaches(db) -> dict:
         if adj and adj.disposition == Disposition.ADJUST_RISK.value and adj.adjusted_severity:
             eff_sev = adj.adjusted_severity
 
-        first = f.first_detected or now
-        if first.tzinfo is None:
-            first = first.replace(tzinfo=dt.timezone.utc)
-
-        sla_days = settings.policy.remediation_sla_days.get(eff_sev, 90)
-        if f.vuln and f.vuln.kev:
-            sla_days = min(sla_days, settings.policy.kev_sla_days)
-
-        due = first + dt.timedelta(days=sla_days)
-        if due >= now:
+        due, is_overdue = sla_status(f.first_detected, eff_sev,
+                                     bool(f.vuln and f.vuln.kev), adj, now)
+        if not is_overdue:
             continue
 
         days_over = (now - due).days
-        from .risk import compute_risk
         risk = compute_risk(f, adj, now=now)
 
         overdue.append({

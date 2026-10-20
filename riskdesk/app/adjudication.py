@@ -239,6 +239,17 @@ def decide(db, adjudication_id: int, approve: bool, actor: str,
         detail={"note": note, "requested_by": adj.requested_by,
                 "expires_at": adj.expires_at.isoformat() if adj.expires_at else None},
     ))
+
+    if approve and adj.supersedes_id:
+        prev = db.get(Adjudication, adj.supersedes_id)
+        if prev is not None and prev.state == AdjudicationState.APPROVED.value:
+            prev.state = AdjudicationState.EXPIRED.value
+            db.add(AuditEvent(
+                actor=actor, action="adjudication.superseded",
+                entity_type="adjudication", entity_id=str(prev.id),
+                summary=f"Superseded by renewal #{adj.id} on {prev.scope_label}",
+                detail={"renewal_id": adj.id},
+            ))
     db.commit()
     return adj
 
@@ -247,6 +258,9 @@ def revoke(db, adjudication_id: int, actor: str, reason: str) -> Adjudication:
     adj = db.get(Adjudication, adjudication_id)
     if adj is None:
         raise PolicyError(["No such decision."])
+    if adj.state not in (AdjudicationState.APPROVED.value,
+                         AdjudicationState.PENDING_APPROVAL.value):
+        raise PolicyError([f"This decision is {adj.state}; only live or pending decisions can be revoked."])
     if len((reason or "").strip()) < 10:
         raise PolicyError(["Give a reason for revoking."])
     adj.state = AdjudicationState.REVOKED.value
@@ -264,15 +278,26 @@ def revoke(db, adjudication_id: int, actor: str, reason: str) -> Adjudication:
 def renew(db, adjudication_id: int, actor: str, justification: str,
           expires_at: dt.datetime, approver: str | None) -> Adjudication:
     """Re-argue an expiring decision. Creates a fresh record rather than
-    editing the old one, so the history of what was accepted when survives."""
+    editing the old one, so the history of what was accepted when survives.
+    The old decision stays in force until the renewal is approved."""
     old = db.get(Adjudication, adjudication_id)
     if old is None:
         raise PolicyError(["No such decision."])
+    if old.state not in (AdjudicationState.APPROVED.value, AdjudicationState.EXPIRED.value):
+        raise PolicyError([f"This decision is {old.state}; only approved or expired decisions can be renewed."])
+    already = db.execute(
+        select(Adjudication.id).where(
+            Adjudication.supersedes_id == old.id,
+            Adjudication.state == AdjudicationState.PENDING_APPROVAL.value)
+    ).scalar()
+    if already:
+        raise PolicyError([f"Renewal #{already} is already awaiting approval."])
 
     problems = validate_decision(old.disposition, justification, expires_at, actor, approver)
     if problems:
         raise PolicyError(problems)
 
+    finding_ids = [a.finding_id for a in old.applications]
     new = Adjudication(
         scope_type=old.scope_type, scope_key=old.scope_key, scope_label=old.scope_label,
         scope_filter=old.scope_filter, disposition=old.disposition,
@@ -280,13 +305,17 @@ def renew(db, adjudication_id: int, actor: str, justification: str,
         justification=justification.strip(),
         compensating_controls=old.compensating_controls,
         adjusted_severity=old.adjusted_severity, adjusted_priority=old.adjusted_priority,
+        assigned_to=old.assigned_to, remediation_due=old.remediation_due,
         requested_by=actor, approver=approver,
         expires_at=expires_at,
-        review_due=default_review_due(old.adjusted_severity or "high"),
+        review_due=default_review_due(
+            old.adjusted_severity or (_dominant_severity(db, finding_ids) if finding_ids else "high")),
+        supersedes_id=old.id,
     )
     db.add(new)
     db.flush()
-    old.state = AdjudicationState.EXPIRED.value
+    for fid in finding_ids:
+        db.add(AdjudicationApplication(adjudication_id=new.id, finding_id=fid))
     db.add(AuditEvent(
         actor=actor, action="adjudication.renew",
         entity_type="adjudication", entity_id=str(new.id),

@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import joinedload
 
-from .enums import SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
+from .enums import CLOSED_STATUSES, SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
 from .models import Adjudication, Asset, Finding, Vuln, utcnow
-from .risk import compute_risk
+from .risk import compute_risk, sla_status
 
 
 @dataclass
@@ -130,7 +130,7 @@ def _base_query(f: FindingFilter):
     stmt = select(
         Finding.id, Finding.severity, Finding.first_detected, Finding.source,
         Finding.fix_available, Vuln.kev, Vuln.cvss_score, Vuln.canonical_id,
-        Asset.name,
+        Asset.name, Finding.status,
     ).join(Vuln, Finding.vuln_id == Vuln.id).join(Asset, Finding.asset_id == Asset.id)
 
     if f.statuses:
@@ -185,7 +185,7 @@ def search(db, f: FindingFilter, page: int = 1, page_size: int = 50) -> dict:
 
     rows: list[Row] = []
     for (fid, sev, first_detected, source, fix_available,
-         kev, cvss, canonical, asset_name) in candidates:
+         kev, cvss, canonical, asset_name, status) in candidates:
         adj = resolution.get(fid)
         eff_sev = sev
         disp = None
@@ -216,16 +216,10 @@ def search(db, f: FindingFilter, page: int = 1, page_size: int = 50) -> dict:
             continue
 
         if f.overdue_only:
-            if disp in (Disposition.ACCEPT_RISK.value, Disposition.FALSE_POSITIVE.value):
+            if status in CLOSED_STATUSES:
                 continue
-            fd = first_detected or now
-            if fd.tzinfo is None:
-                fd = fd.replace(tzinfo=dt.timezone.utc)
-            from .config import settings as _s
-            days = _s.policy.remediation_sla_days.get(eff_sev, 90)
-            if kev:
-                days = min(days, _s.policy.kev_sla_days)
-            if fd + dt.timedelta(days=days) >= now:
+            _due, overdue = sla_status(first_detected, eff_sev, bool(kev), adj, now)
+            if not overdue:
                 continue
 
         rows.append(Row(
@@ -311,6 +305,11 @@ def serialize_finding(f: Finding, risk, adj: Adjudication | None) -> dict:
         "fix_version": f.fix_version,
         "first_detected": _iso(f.first_detected),
         "last_seen": _iso(f.last_seen),
+        "last_synced_at": _iso(f.last_synced_at),
+        "closed_at": _iso(f.closed_at),
+        "reopened_count": f.reopened_count or 0,
+        "verified_by": f.verified_by,
+        "verified_at": _iso(f.verified_at),
         "source_url": f.source_url,
         "source_severity": f.source_severity,
         "asset": {
@@ -362,6 +361,7 @@ def _serialize_adj(a: Adjudication) -> dict:
         "review_due": _iso(a.review_due), "expires_at": _iso(a.expires_at),
         "applied_count": len(a.applications),
         "scope_filter": a.scope_filter,
+        "supersedes_id": a.supersedes_id,
     }
 
 
@@ -376,7 +376,7 @@ def facets(db, f: FindingFilter) -> dict:
         setattr(g, exclude, [] if isinstance(getattr(g, exclude), list) else False)
         rows = db.execute(_base_query(g)).all()
         out: dict[str, int] = {}
-        for (fid, sev, _fd, source, _fa, _kev, _cvss, _cid, _an) in rows:
+        for (fid, sev, _fd, source, _fa, _kev, _cvss, _cid, _an, _st) in rows:
             adj = resolution.get(fid)
             eff = sev
             if adj and adj.disposition == Disposition.ADJUST_RISK.value and adj.adjusted_severity:
@@ -395,12 +395,18 @@ def facets(db, f: FindingFilter) -> dict:
         .with_only_columns(Finding.category, func.count())
         .group_by(Finding.category)
     ).all()
+    status_rows = db.execute(
+        _base_query(FindingFilter(**{**f.__dict__, "statuses": []}))
+        .with_only_columns(Finding.status, func.count())
+        .group_by(Finding.status)
+    ).all()
 
     return {
         "severity": counts("severities"),
         "source": counts("sources"),
         "disposition": counts("dispositions"),
         "category": {c: n for c, n in cat_rows},
+        "status": {s: n for s, n in status_rows},
     }
 
 

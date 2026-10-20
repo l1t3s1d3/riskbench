@@ -39,6 +39,9 @@ class GitHubConnector(Connector):
 
     def __init__(self, cfg=None):
         self.cfg = cfg or settings.github
+        # Categories not read in full by the last fetch(); the sync engine must
+        # not treat their absence as remediation.
+        self.skipped_categories: set[str] = set()
 
     def configured(self) -> bool:
         return self.cfg.configured
@@ -80,15 +83,22 @@ class GitHubConnector(Connector):
 
     def fetch(self, limit: int | None = None) -> Iterator[NormalizedRecord]:
         seen = 0
-        streams = []
-        if self.cfg.include_dependabot:
-            streams.append(("dependabot/alerts", self._map_dependabot))
-        if self.cfg.include_code_scanning:
-            streams.append(("code-scanning/alerts", self._map_code_scanning))
-        if self.cfg.include_secret_scanning:
-            streams.append(("secret-scanning/alerts", self._map_secret_scanning))
+        self.skipped_categories = set()
+        families = [
+            (self.cfg.include_dependabot, "dependabot/alerts", self._map_dependabot,
+             FindingCategory.DEPENDENCY.value),
+            (self.cfg.include_code_scanning, "code-scanning/alerts", self._map_code_scanning,
+             FindingCategory.CODE_SCANNING.value),
+            (self.cfg.include_secret_scanning, "secret-scanning/alerts", self._map_secret_scanning,
+             FindingCategory.SECRET.value),
+        ]
+        for enabled, _path, _mapper, category in families:
+            if not enabled:
+                self.skipped_categories.add(category)
 
-        for path, mapper in streams:
+        for enabled, path, mapper, category in families:
+            if not enabled:
+                continue
             try:
                 for item in self._paginate(f"/orgs/{self.cfg.org}/{path}"):
                     rec = mapper(item)
@@ -100,6 +110,7 @@ class GitHubConnector(Connector):
             except PermissionError as exc:
                 # One disabled feature should not fail the whole sync.
                 log.warning("Skipping %s: %s", path, exc)
+                self.skipped_categories.add(category)
 
     def _paginate(self, path: str) -> Iterator[dict]:
         url = f"{self.cfg.api_url}{path}"

@@ -22,7 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from .config import settings
-from .enums import SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
+from .enums import CLOSED_STATUSES, SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
 from .models import Adjudication, Finding, utcnow
 
 
@@ -256,9 +256,11 @@ def compute_risk(finding: Finding, adj: Adjudication | None,
     )
 
 
-def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
-         now: dt.datetime) -> tuple[dt.datetime | None, bool]:
-    """Remediation due date. Explicit due dates on a routing decision win."""
+def sla_status(first_detected: dt.datetime | None, eff_sev: str, kev: bool,
+               adj: Adjudication | None, now: dt.datetime) -> tuple[dt.datetime | None, bool]:
+    """Remediation due date and whether it has passed. The single SLA rule:
+    accepted/false-positive have none; an explicit due date on a decision wins;
+    otherwise severity SLA from first detection, capped by the KEV SLA."""
     if adj is not None and adj.disposition in (
         Disposition.ACCEPT_RISK.value, Disposition.FALSE_POSITIVE.value
     ):
@@ -266,12 +268,23 @@ def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
     if adj is not None and adj.remediation_due:
         due = _aware(adj.remediation_due)
         return due, due < now
-    first = _aware(finding.first_detected) or now
+    first = _aware(first_detected) or now
     days = settings.policy.remediation_sla_days.get(eff_sev, 90)
-    if finding.vuln and finding.vuln.kev:
+    if kev:
         days = min(days, settings.policy.kev_sla_days)
     due = first + dt.timedelta(days=days)
     return due, due < now
+
+
+def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
+         now: dt.datetime) -> tuple[dt.datetime | None, bool]:
+    due, overdue = sla_status(finding.first_detected, eff_sev,
+                              bool(finding.vuln and finding.vuln.kev), adj, now)
+    # A closed finding is no longer accruing lateness; whether it closed within
+    # SLA is reported by the lifecycle timeline and metrics instead.
+    if finding.status in CLOSED_STATUSES:
+        overdue = False
+    return due, overdue
 
 
 def _aware(value: dt.datetime | None) -> dt.datetime | None:

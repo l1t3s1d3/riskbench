@@ -50,6 +50,7 @@ class WizConnector(Connector):
         self.cfg = cfg or settings.wiz
         self._token: str | None = None
         self._token_expiry: float = 0.0
+        self.skipped_categories: set[str] = set()
 
     def configured(self) -> bool:
         return self.cfg.configured
@@ -144,6 +145,7 @@ class WizConnector(Connector):
 
     def fetch(self, limit: int | None = None) -> Iterator[NormalizedRecord]:
         seen = 0
+        self.skipped_categories = set()
         for rec in self._fetch_vulns():
             yield rec
             seen += 1
@@ -158,6 +160,7 @@ class WizConnector(Connector):
         except Exception as exc:
             # Cloud config is a separate entitlement; do not fail the whole sync.
             log.warning("Wiz configuration findings skipped: %s", exc)
+            self.skipped_categories.add(FindingCategory.MISCONFIGURATION.value)
 
     def _paginate(self, query: str, root: str, filter_by: dict) -> Iterator[dict]:
         after = None
