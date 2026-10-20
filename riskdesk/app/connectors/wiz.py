@@ -151,6 +151,18 @@ class WizConnector(Connector):
             seen += 1
             if limit and seen >= limit:
                 return
+        # Resolved-pass: catches fixes applied in Wiz so we have historical
+        # remediation data anchored to the real resolvedAt. Failures here must
+        # not fail the whole sync, since RESOLVED filter support varies.
+        if self.cfg.resolved_window_days:
+            try:
+                for rec in self._fetch_resolved_vulns(self.cfg.resolved_window_days):
+                    yield rec
+                    seen += 1
+                    if limit and seen >= limit:
+                        return
+            except Exception as exc:
+                log.warning("Wiz resolved-pull skipped: %s", exc)
         try:
             for rec in self._fetch_config():
                 yield rec
@@ -195,6 +207,20 @@ class WizConnector(Connector):
             log.error("Your tenant schema may differ. Run: python -m app.cli wiz-introspect --type VulnerabilityFinding")
             raise
         log.info("Wiz vulnerability findings fetched: %d", count)
+
+    def _fetch_resolved_vulns(self, days: int) -> Iterator[NormalizedRecord]:
+        log.info("Fetching resolved Wiz vulnerability findings (last %d days)", days)
+        count = 0
+        filter_by = {
+            "status": ["RESOLVED"],
+            "resolvedAt": {"inLast": {"amount": days, "unit": "DAYS"}},
+        }
+        for node in self._paginate(WIZ_VULN_FINDINGS, "vulnerabilityFindings", filter_by):
+            rec = self._map_vuln(node)
+            if rec is not None:
+                count += 1
+                yield rec
+        log.info("Wiz resolved vulnerability findings fetched: %d", count)
 
     def _fetch_config(self) -> Iterator[NormalizedRecord]:
         log.info("Fetching configuration findings from Wiz (filter: result FAIL)")
@@ -265,6 +291,7 @@ class WizConnector(Connector):
             fix_version=node.get("fixedVersion"),
             first_detected=parse_ts(node.get("firstDetectedAt")),
             last_seen=parse_ts(node.get("lastDetectedAt")),
+            resolved_at=parse_ts(node.get("resolvedAt")),
             source_url=node.get("link"),
             raw=node,
         )

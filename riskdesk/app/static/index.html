@@ -149,6 +149,54 @@
       </div>
     </div>
     <div id="lifecycleMetrics"></div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Opened vs closed over time</span></div>
+      <div class="toolbar-right">
+        <label class="micro" for="trendGranularity">Bucket</label>
+        <select id="trendGranularity" class="field-sm">
+          <option value="week" selected>Weekly</option>
+          <option value="month">Monthly</option>
+          <option value="quarter">Quarterly</option>
+          <option value="day">Daily</option>
+        </select>
+        <label class="micro" for="trendWindow">Window</label>
+        <select id="trendWindow" class="field-sm">
+          <option value="90">90 days</option>
+          <option value="180">180 days</option>
+          <option value="365" selected>1 year</option>
+          <option value="730">2 years</option>
+        </select>
+      </div>
+    </div>
+    <div id="trendChart" style="padding:0 18px 18px"></div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Remediated findings</span></div>
+      <div class="toolbar-right">
+        <label class="micro" for="remStart">From</label>
+        <input type="date" id="remStart" class="field-sm">
+        <label class="micro" for="remEnd">To</label>
+        <input type="date" id="remEnd" class="field-sm">
+        <select id="remSeverity" class="field-sm">
+          <option value="">All severities</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+        <select id="remSource" class="field-sm">
+          <option value="">All sources</option>
+          <option value="wiz">Wiz</option>
+          <option value="falcon">CrowdStrike Falcon</option>
+          <option value="github">GitHub</option>
+        </select>
+        <button id="loadRemediated" class="btn">Load</button>
+        <a id="exportRemediated" class="btn-ghost" href="#">Export CSV</a>
+      </div>
+    </div>
+    <div id="remediatedList"></div>
+
     <div class="toolbar"><div class="toolbar-left"><span class="count">Audit trail</span></div></div>
     <div id="auditList" class="rows"></div>
   </section>
@@ -247,6 +295,24 @@
       the GraphQL query builder output, or a raw <code>{"findings": [...]}</code> array.
       This bypasses the live API and lets you validate schema mapping before configuring the connector.</div>
       <div id="wizImportStatus" style="margin-top:8px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Historical remediation import</span></div>
+      <div class="toolbar-right">
+        <label class="btn" style="cursor:pointer">
+          Import CSV
+          <input type="file" id="historicalImportFile" accept=".csv" hidden>
+        </label>
+      </div>
+    </div>
+    <div style="padding:0 18px 12px">
+      <div class="hint">Backload remediated findings from a CSV so prior remediation history is reportable.
+      Required columns: <code>canonical_id, source, asset, severity, first_detected, closed_at, status</code>.
+      Optional: <code>cve_id, title, category, component, component_version, source_finding_id, asset_type</code>.
+      <code>status</code> is one of fixed / verified_fixed / stale / suppressed_at_source.
+      Dates in ISO 8601 (<code>2026-04-12</code> or <code>2026-04-12T15:00:00Z</code>).</div>
+      <div id="historicalImportStatus" style="margin-top:8px"></div>
     </div>
 
     <div class="toolbar">

@@ -288,7 +288,7 @@ function renderFacets(fac) {
     (v) => ({
       os_vuln: 'Operating system', cloud_vuln: 'Cloud workload', container: 'Container image',
       misconfiguration: 'Cloud misconfiguration', dependency: 'Dependency',
-      code_scanning: 'Source code', secret: 'Exposed secret',
+      code_scanning: 'Source code', secret: 'Exposed secret', detection: 'EDR detection',
     }[v] || v));
 
   ['facetStatus', 'facetSeverity', 'facetSource', 'facetDisposition', 'facetCategory'].forEach((id) => {
@@ -985,7 +985,13 @@ async function openRegisterDetail(id) {
 
 async function loadActivity() {
   $('lcWindow').onchange = loadLifecycleMetrics;
+  $('trendGranularity').onchange = loadTrendChart;
+  $('trendWindow').onchange = loadTrendChart;
+  $('loadRemediated').onclick = loadRemediated;
+  $('exportRemediated').onclick = (e) => { e.preventDefault(); window.open(remediatedUrl('/api/export/remediated.csv')); };
   loadLifecycleMetrics();
+  loadTrendChart();
+  loadRemediated();
   const rows = (await api('/api/audit?limit=300')).events || [];
   $('auditList').innerHTML = rows.length ? rows.map((e) => `
     <div class="row" style="grid-template-columns:30px 1fr 140px 150px;cursor:default">
@@ -1040,6 +1046,163 @@ async function loadLifecycleMetrics() {
     switchView('findings');
     loadFindings();
   };
+}
+
+// ---------------------------------------------------------------- trend chart
+
+async function loadTrendChart() {
+  const el = $('trendChart');
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  let data;
+  try {
+    data = await api(`/api/lifecycle/trends?days=${$('trendWindow').value}&granularity=${$('trendGranularity').value}`);
+  } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  el.innerHTML = renderTrendChart(data);
+}
+
+function renderTrendChart(data) {
+  const series = data.series || [];
+  if (!series.length) return '<div class="hint">No history in this window.</div>';
+  const W = 1120, H = 300, P_L = 44, P_R = 28, P_T = 20, P_B = 54;
+  const inner_w = W - P_L - P_R, inner_h = H - P_T - P_B;
+  const maxFlow = Math.max(1, ...series.map((s) => Math.max(s.opened, s.closed)));
+  const maxBacklog = Math.max(1, ...series.map((s) => s.backlog_end));
+  const n = series.length;
+  const bar_w = Math.max(2, (inner_w / n) * 0.42);
+  const slot = inner_w / n;
+
+  const bars = series.map((s, i) => {
+    const x = P_L + i * slot + slot / 2;
+    const openedH = (s.opened / maxFlow) * inner_h;
+    const closedH = (s.closed / maxFlow) * inner_h;
+    return `
+      <rect x="${x - bar_w - 1}" y="${P_T + inner_h - openedH}" width="${bar_w}" height="${openedH}" fill="var(--seal)" opacity="0.85">
+        <title>${s.bucket_start.slice(0, 10)}: ${s.opened} opened</title></rect>
+      <rect x="${x + 1}" y="${P_T + inner_h - closedH}" width="${bar_w}" height="${closedH}" fill="var(--ink)" opacity="0.75">
+        <title>${s.bucket_start.slice(0, 10)}: ${s.closed} closed</title></rect>`;
+  }).join('');
+
+  const path = series.map((s, i) => {
+    const x = P_L + i * slot + slot / 2;
+    const y = P_T + inner_h - (s.backlog_end / maxBacklog) * inner_h;
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const y = P_T + inner_h - f * inner_h;
+    const label = Math.round(f * maxFlow);
+    return `<line x1="${P_L}" x2="${W - P_R}" y1="${y}" y2="${y}" stroke="var(--rule-soft)"/>
+            <text x="${P_L - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--slate)">${label}</text>`;
+  }).join('');
+
+  const yTicksR = [0, 0.5, 1].map((f) => {
+    const y = P_T + inner_h - f * inner_h;
+    const label = Math.round(f * maxBacklog);
+    return `<text x="${W - P_R + 6}" y="${y + 4}" font-size="10" fill="var(--slate)">${label}</text>`;
+  }).join('');
+
+  const everyNth = Math.max(1, Math.ceil(n / 10));
+  const xLabels = series.map((s, i) => {
+    if (i % everyNth !== 0 && i !== n - 1) return '';
+    const x = P_L + i * slot + slot / 2;
+    return `<text x="${x}" y="${H - 28}" text-anchor="middle" font-size="10" fill="var(--slate)">${s.bucket_start.slice(0, 10)}</text>`;
+  }).join('');
+
+  const legend = `
+    <g font-size="11" fill="var(--ink)">
+      <rect x="${P_L}" y="${H - 14}" width="10" height="10" fill="var(--seal)" opacity="0.85"/>
+      <text x="${P_L + 15}" y="${H - 5}">Opened</text>
+      <rect x="${P_L + 80}" y="${H - 14}" width="10" height="10" fill="var(--ink)" opacity="0.75"/>
+      <text x="${P_L + 95}" y="${H - 5}">Closed</text>
+      <line x1="${P_L + 160}" y1="${H - 9}" x2="${P_L + 180}" y2="${H - 9}" stroke="var(--notice)" stroke-width="2"/>
+      <text x="${P_L + 185}" y="${H - 5}">Open backlog (right axis)</text>
+    </g>`;
+
+  const summary = `<div style="margin-bottom:8px;font-size:12.5px;color:var(--slate)">
+    <strong>${data.totals.opened.toLocaleString()}</strong> opened,
+    <strong>${data.totals.closed.toLocaleString()}</strong> closed since ${data.start.slice(0, 10)}.
+    Backlog at window start: <strong>${data.baseline_open_at_start.toLocaleString()}</strong>,
+    now: <strong>${(series[series.length - 1]?.backlog_end || 0).toLocaleString()}</strong>.</div>`;
+
+  return summary + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:360px" xmlns="http://www.w3.org/2000/svg">
+    <text x="${P_L}" y="12" font-size="10" fill="var(--slate)">Findings per ${data.granularity}</text>
+    <text x="${W - P_R}" y="12" text-anchor="end" font-size="10" fill="var(--slate)">Open backlog</text>
+    ${yTicks}
+    ${yTicksR}
+    ${bars}
+    <path d="${path}" fill="none" stroke="var(--notice)" stroke-width="2"/>
+    ${xLabels}
+    ${legend}
+  </svg>`;
+}
+
+// ---------------------------------------------------------------- remediated
+
+function remediatedUrl(base) {
+  const p = new URLSearchParams();
+  if ($('remStart').value) p.set('start', $('remStart').value);
+  if ($('remEnd').value) p.set('end', $('remEnd').value);
+  if ($('remSeverity').value) p.append('severity', $('remSeverity').value);
+  if ($('remSource').value) p.append('source', $('remSource').value);
+  return `${base}?${p}`;
+}
+
+async function loadRemediated() {
+  const el = $('remediatedList');
+  el.innerHTML = '<div class="spin" style="padding:18px">Loading…</div>';
+  let data;
+  try { data = await api(remediatedUrl('/api/findings/remediated') + '&page_size=100'); }
+  catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (data.total === 0) {
+    el.innerHTML = '<div class="hint" style="padding:18px">No remediated findings in this window.</div>';
+    return;
+  }
+  const s = data.summary;
+  const sevChips = Object.entries(s.by_severity).sort((a, b) => SEV_ORDER.indexOf(a[0]) - SEV_ORDER.indexOf(b[0]))
+    .map(([k, v]) => `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+  const srcChips = Object.entries(s.by_source).map(([k, v]) =>
+    `<span class="tag">${esc({wiz: 'Wiz', falcon: 'Falcon', github: 'GitHub'}[k] || k)}: ${v}</span>`).join(' ');
+  const monthChips = Object.entries(s.by_month).map(([k, v]) =>
+    `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+
+  const header = `<div style="padding:0 18px 12px">
+    <div style="font-size:13px;margin-bottom:8px">
+      <strong>${data.total.toLocaleString()}</strong> remediated findings
+      · mean time to close <strong>${s.mean_time_to_close_days ?? '—'}d</strong>
+      · median <strong>${s.median_time_to_close_days ?? '—'}d</strong>
+      · closed within SLA <strong>${s.closed_within_sla_pct ?? '—'}%</strong>
+      (${s.closed_within_sla}/${s.measurable_against_sla})
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${sevChips}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${srcChips}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${monthChips}</div>
+  </div>`;
+
+  const rows = data.findings.map((r) => {
+    const sev = r.effective_severity;
+    const slaClass = r.closed_within_sla ? '' : 'style="color:var(--notice)"';
+    return `<div class="row" style="cursor:pointer" onclick="openDetail(${r.finding_id})">
+      <div class="edge sev-${sev}"></div>
+      <div class="row-check"></div>
+      <div class="row-main">
+        <div class="row-id">${esc(r.canonical_id || '')}</div>
+        <div class="row-title">${esc(r.title || '')}</div>
+        <div class="row-meta">
+          <span>${gauge(sev)} <em>${sev}</em></span>
+          <span>${esc(r.source)}</span>
+          ${r.component ? `<span>${esc(r.component)}</span>` : ''}
+          <span ${slaClass}>closed in ${r.time_to_close_days}d${r.closed_within_sla ? ', within SLA' : ', past SLA'}</span>
+          ${r.reopened_count ? `<span class="tag tag-reopened">reopened ${r.reopened_count}×</span>` : ''}
+        </div>
+      </div>
+      <div class="row-asset">${esc(r.asset || '')}<small>${esc(r.asset_type || '')}</small></div>
+      <div class="row-risk"><div class="score">${fmtDate(r.closed_at)}</div></div>
+      <div class="row-state"><span class="tag tag-closed">${esc(STATUS_SHORT[r.status] || r.status)}</span></div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = header + `<div class="rows">${rows}</div>` +
+    (data.pages > 1 ? `<div class="hint" style="padding:12px 18px">Showing page 1 of ${data.pages}. Use the Export CSV button to pull everything.</div>` : '');
 }
 
 // ---------------------------------------------------------------- sources
@@ -2909,6 +3072,42 @@ async function _submitTicket(findingIds) {
         ${r.mapping_errors && r.mapping_errors.length ? `<br>${r.mapping_errors.length} nodes could not be mapped.` : ''}
       </div>`;
       toast(`Imported ${r.findings} findings from Wiz export`);
+    } catch (e) {
+      status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Error:</strong> ${esc(e.message)}</div>`;
+    }
+    input.value = '';
+  };
+})();
+
+// ---------------------------------------------------------------- Historical remediation import
+
+(function wireHistoricalImport() {
+  const input = $('historicalImportFile');
+  if (!input) return;
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    const status = $('historicalImportStatus');
+    status.innerHTML = '<div class="spin">Importing…</div>';
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const r = await fetch('/api/findings/import-historical', {
+        method: 'POST', body: form, headers: { 'X-RiskDesk-User': currentUser() },
+      });
+      const data = await r.json();
+      if (!r.ok || data.ok === false) {
+        status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Import had errors.</strong>
+          ${data.created || 0} created, ${data.skipped || 0} already existed, ${data.errors || 0} failed.</div>`;
+        const errs = (data.results || []).filter((x) => x.status === 'error').slice(0, 10);
+        if (errs.length) {
+          status.innerHTML += `<pre style="font-size:11px;max-height:200px;overflow:auto">${esc(JSON.stringify(errs, null, 2))}</pre>`;
+        }
+      } else {
+        status.innerHTML = `<div class="hint"><strong>Import successful:</strong>
+          ${data.created} created, ${data.skipped} already existed from ${data.processed} rows.</div>`;
+        toast(`Imported ${data.created} historical findings`);
+      }
     } catch (e) {
       status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Error:</strong> ${esc(e.message)}</div>`;
     }

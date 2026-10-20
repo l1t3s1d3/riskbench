@@ -305,6 +305,7 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     transition = apply_reported_status(
         db, row, rec.status, is_new, utcnow(),
         actor=f"sync:{source}", sync_run_id=ctx.run_id,
+        resolved_at=rec.resolved_at,
     )
     if transition == "fixed":
         stats["closed"] += 1

@@ -155,6 +155,12 @@ FALCON_TOKEN_PATH = "/oauth2/token"
 # Lightweight check: hit Spotlight with limit=1 to verify the scope is granted.
 FALCON_PROBE_PARAMS = {"limit": 1}
 
+# Alerts API v2 — unified EDR detections / alerts (requires "Alerts: Read" scope).
+FALCON_ALERTS_LIST_PATH = "/alerts/queries/alerts/v2"
+FALCON_ALERTS_HYDRATE_PATH = "/alerts/entities/alerts/v2"
+# Alerts hydrate accepts up to 1000 composite_ids per request; keep well under.
+FALCON_ALERTS_HYDRATE_BATCH = 100
+
 
 # ---------------------------------------------------------------------------
 #  QUERY REGISTRY  —  machine-readable catalogue for the diagnostics UI

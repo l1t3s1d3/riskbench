@@ -2,6 +2,7 @@
 plus the decision, exception and ticket paths that run alongside it."""
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 
 import pytest
@@ -318,6 +319,201 @@ def test_ticket_drift_in_metrics(client, db, seed_data):
 
 
 # --- schema migration ------------------------------------------------------------
+
+# --- historical remediation reporting ----------------------------------------
+
+def test_sync_uses_source_resolved_at_not_sync_time(sync, db):
+    """A fix reported today for an alert that closed 60 days ago must stamp
+    closed_at with the real date, not today."""
+    old_close = NOW - dt.timedelta(days=60)
+    sync([rec("a")])
+    sync([rec("a", status="fixed", last_seen=NOW), ],)
+    db.expire_all()
+    # Simulate: real connectors would set resolved_at from the source.
+    r2 = dataclasses.replace(rec("b"), status="fixed", resolved_at=old_close,
+                             first_detected=NOW - dt.timedelta(days=90))
+    sync([r2])
+    f = _finding(db, "b")
+    assert f.status == "fixed"
+    assert f.closed_at is not None
+    gap = (NOW.replace(tzinfo=None) - f.closed_at.replace(tzinfo=None)).days
+    assert 59 <= gap <= 61, f"closed_at should be the historical date, not today (got {f.closed_at})"
+
+
+def test_remediated_endpoint_and_summary(sync, db, client):
+    sync([rec(f"f{i}", first=NOW - dt.timedelta(days=20)) for i in range(5)])
+    # Three get fixed; two stay open.
+    sync([rec(f"f{i}", status="fixed", first=NOW - dt.timedelta(days=20)) for i in range(3)] +
+         [rec(f"f{i}", first=NOW - dt.timedelta(days=20)) for i in range(3, 5)])
+    r = client.get("/api/findings/remediated").json()
+    assert r["total"] == 3
+    assert r["summary"]["by_severity"].get("high") == 3
+    assert r["summary"]["mean_time_to_close_days"] is not None
+    assert all(row["status"] == "fixed" for row in r["findings"])
+
+
+def test_remediated_filters_by_date_range(sync, db, client):
+    """closed_at bounds exclude fixes outside the window."""
+    sync([rec("old"), rec("new")])
+    sync([rec("old", status="fixed"), rec("new")])
+    f = _finding(db, "old")
+    f.closed_at = NOW - dt.timedelta(days=400)
+    db.commit()
+    sync([rec("new", status="fixed")])
+    r = client.get("/api/findings/remediated?start=" +
+                   (NOW - dt.timedelta(days=30)).date().isoformat()).json()
+    assert r["total"] == 1
+    assert r["findings"][0]["canonical_id"] == "GHSA-new"
+
+
+def test_trends_time_series(sync, db, client):
+    sync([rec(f"t{i}", first=NOW - dt.timedelta(days=d))
+          for i, d in enumerate([5, 10, 60, 120])])
+    sync([rec("t0", status="fixed", first=NOW - dt.timedelta(days=5)),
+          rec("t1", first=NOW - dt.timedelta(days=10)),
+          rec("t2", first=NOW - dt.timedelta(days=60)),
+          rec("t3", first=NOW - dt.timedelta(days=120))])
+    r = client.get("/api/lifecycle/trends?days=180&granularity=month").json()
+    assert r["granularity"] == "month"
+    assert len(r["series"]) >= 4
+    assert r["totals"]["opened"] >= 4
+    assert r["totals"]["closed"] >= 1
+    # Backlog line is monotone across buckets up through the current one.
+    assert any(b["backlog_end"] >= 1 for b in r["series"])
+
+
+def test_trends_granularities(client, sync, db):
+    sync([rec("x")])
+    for g in ("day", "week", "month", "quarter"):
+        r = client.get(f"/api/lifecycle/trends?days=90&granularity={g}")
+        assert r.status_code == 200, (g, r.text)
+    r = client.get("/api/lifecycle/trends?granularity=hour")
+    assert r.status_code == 422
+
+
+def test_historical_import_backloads_remediation(client, db):
+    import io, csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["canonical_id", "source", "asset", "severity",
+                "first_detected", "closed_at", "status", "title", "category"])
+    w.writerow(["CVE-2024-99991", "legacy", "web-prod-01", "critical",
+                "2024-01-15", "2024-02-20", "verified_fixed",
+                "Historic log4shell on web-prod-01", "os_vuln"])
+    w.writerow(["CVE-2024-99992", "legacy", "db-prod-01", "high",
+                "2024-03-01", "2024-04-10", "fixed", "", ""])
+    buf.seek(0)
+    r = client.post("/api/findings/import-historical",
+                    files={"file": ("hist.csv", buf.getvalue(), "text/csv")})
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["created"] == 2 and data["errors"] == 0
+
+    # Re-importing is idempotent.
+    buf.seek(0)
+    r2 = client.post("/api/findings/import-historical",
+                     files={"file": ("hist.csv", buf.getvalue(), "text/csv")}).json()
+    assert r2["created"] == 0 and r2["skipped"] == 2
+
+    rem = client.get("/api/findings/remediated?source=legacy").json()
+    assert rem["total"] == 2
+    verified = [r for r in rem["findings"] if r["status"] == "verified_fixed"]
+    assert len(verified) == 1
+    assert verified[0]["time_to_close_days"] == 36
+
+
+def test_historical_import_rejects_bad_rows(client, db):
+    import io, csv
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["canonical_id", "source", "asset", "severity", "first_detected", "closed_at", "status"])
+    w.writerow(["", "x", "host", "high", "2024-01-01", "2024-02-01", "fixed"])  # no canonical_id
+    w.writerow(["CVE-X", "x", "host", "high", "2024-01-01", "2024-02-01", "open"])  # bad status
+    w.writerow(["CVE-Y", "x", "host", "high", "2024-01-01", "", "fixed"])  # no close date
+    buf.seek(0)
+    r = client.post("/api/findings/import-historical",
+                    files={"file": ("bad.csv", buf.getvalue(), "text/csv")}).json()
+    assert r["errors"] == 3
+    assert r["created"] == 0
+
+
+def test_remediated_csv_export(client, sync, db):
+    sync([rec("a", first=NOW - dt.timedelta(days=15))])
+    sync([rec("a", status="fixed", first=NOW - dt.timedelta(days=15))])
+    r = client.get("/api/export/remediated.csv")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    assert "GHSA-a" in r.text
+    assert "time_to_close_days" in r.text
+
+
+def test_dismissed_alerts_count_as_suppressed_not_fixed():
+    """GitHub 'dismissed' alerts are suppressed at the source, not remediated,
+    and must not inflate remediation metrics."""
+    from app.connectors.github import _gh_status
+    assert _gh_status({"state": "open"}) == "open"
+    assert _gh_status({"state": "fixed"}) == "fixed"
+    assert _gh_status({"state": "dismissed"}) == "suppressed_at_source"
+    assert _gh_status({"state": "auto_dismissed"}) == "suppressed_at_source"
+
+
+# --- Falcon detections --------------------------------------------------------
+
+def test_falcon_detection_mapping():
+    from app.connectors.falcon import FalconConnector, _falcon_severity
+    assert _falcon_severity(80) == "critical"
+    assert _falcon_severity(60) == "high"
+    assert _falcon_severity(40) == "medium"
+    assert _falcon_severity(10) == "low"
+    assert _falcon_severity("CRITICAL") == "critical"
+
+    c = FalconConnector(cfg=type("C", (), {})())
+    alert = {
+        "composite_id": "123", "name": "ProcessInjection", "severity": 75,
+        "status": "closed", "created_timestamp": "2026-10-01T00:00:00Z",
+        "updated_timestamp": "2026-10-05T00:00:00Z",
+        "device": {"device_id": "aid-1", "hostname": "web-01", "os_version": "Windows 10",
+                   "local_ip": "10.0.0.5", "platform_name": "Windows"},
+        "description": "Suspicious process injection detected",
+    }
+    rec = c._map_detection(alert)
+    assert rec.category == "detection"
+    assert rec.severity == "critical"
+    assert rec.vuln.canonical_id == "falcon-detect:ProcessInjection"
+    assert rec.asset.name == "web-01"
+    assert rec.status == "fixed"
+    assert rec.resolved_at is not None
+
+
+def test_detection_category_appears_in_facets_and_metrics(sync, db, client):
+    """A detection flows through sync and shows up on reports the same way vulns do."""
+    detection = NormalizedRecord(
+        source_finding_id="detect:abc", category="detection",
+        asset=NormalizedAsset(source_asset_id="aid-1", name="web-01", asset_type="endpoint"),
+        vuln=NormalizedVuln(canonical_id="falcon-detect:ProcessInjection",
+                            title="Process injection", severity="critical"),
+        severity="critical", status="open",
+        first_detected=NOW - dt.timedelta(days=7),
+    )
+    sync([detection])
+    sync([dataclasses.replace(detection, status="fixed",
+                              resolved_at=NOW - dt.timedelta(days=1))])
+    facets = client.get("/api/facets?status=open&status=fixed").json()
+    assert facets["category"].get("detection") == 1
+    r = client.get("/api/findings/remediated?category=detection").json()
+    assert r["total"] == 1
+    assert r["findings"][0]["canonical_id"] == "falcon-detect:ProcessInjection"
+
+
+# --- lifecycle status handling -------------------------------------------------
+
+def test_suppressed_at_source_from_connector(sync, db):
+    sync([rec("a")])
+    sync([rec("a", status="suppressed_at_source", last_seen=NOW)])
+    f = _finding(db, "a")
+    assert f.status == "suppressed_at_source"
+    assert f.closed_at is not None
+
 
 def test_add_missing_columns_upgrades_existing_table(tmp_path):
     from app.db import add_missing_columns

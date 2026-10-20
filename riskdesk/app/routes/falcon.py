@@ -268,6 +268,57 @@ def falcon_test_suite(request: Request):
 
     _step("sample", "Fetch and map a sample vulnerability through the sync pipeline", sample_mapping)
 
+    # Step 8: Detections (Alerts API v2) — the EDR feed, separate from Spotlight.
+    def check_detections():
+        import httpx
+        from ..api_queries import FALCON_ALERTS_LIST_PATH, FALCON_ALERTS_HYDRATE_PATH
+        days = c.cfg.detections_window_days or 7
+        r = httpx.get(
+            f"{c.cfg.base_url}{FALCON_ALERTS_LIST_PATH}",
+            params={"filter": f"updated_timestamp:>'now-{days}d'", "limit": 3,
+                    "sort": "updated_timestamp.desc"},
+            headers=c._headers(), timeout=30,
+        )
+        if r.status_code == 403:
+            raise RuntimeError(
+                "403 on alerts list: the API client lacks the 'Alerts: Read' scope. "
+                "Add it in the CrowdStrike console, or set FALCON_DETECTIONS=0 to disable.")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Alerts list HTTP {r.status_code}: {r.text[:300]}")
+        ids = r.json().get("resources") or []
+        total = r.json().get("meta", {}).get("pagination", {}).get("total", 0)
+        result = {"window_days": days, "total_in_window": total, "sample_ids": len(ids)}
+        if not ids:
+            result["note"] = "No detections in the window. Either the fleet is quiet or scope is missing."
+            return result
+        hr = httpx.post(
+            f"{c.cfg.base_url}{FALCON_ALERTS_HYDRATE_PATH}",
+            json={"composite_ids": ids[:3]},
+            headers=c._headers(), timeout=30,
+        )
+        if hr.status_code >= 400:
+            raise RuntimeError(f"Alerts hydrate HTTP {hr.status_code}: {hr.text[:200]}")
+        alerts = hr.json().get("resources") or []
+        if alerts:
+            sample = alerts[0]
+            rec = c._map_detection(sample)
+            result["sample"] = {
+                "name": sample.get("name") or sample.get("display_name"),
+                "severity": sample.get("severity"),
+                "status": sample.get("status"),
+                "hostname": (sample.get("device") or {}).get("hostname"),
+            }
+            if rec:
+                result["mapped"] = {
+                    "canonical_id": rec.vuln.canonical_id,
+                    "category": rec.category,
+                    "severity": rec.severity,
+                    "status": rec.status,
+                }
+        return result
+
+    _step("detections", "Probe Falcon EDR detections (Alerts API v2)", check_detections)
+
     return _summary(steps)
 
 

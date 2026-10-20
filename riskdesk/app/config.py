@@ -27,6 +27,10 @@ class WizConfig:
     auth_url: str = field(default_factory=lambda: os.getenv("WIZ_AUTH_URL", "https://auth.app.wiz.io/oauth/token"))
     audience: str = field(default_factory=lambda: os.getenv("WIZ_AUDIENCE", "wiz-api"))
     page_size: int = field(default_factory=lambda: _int("WIZ_PAGE_SIZE", 500))
+    # How far back to pull resolved findings so historical remediation data
+    # survives in RiskDesk. 0 disables the resolved-pull pass.
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("WIZ_RESOLVED_WINDOW_DAYS", 180))
 
     @property
     def configured(self) -> bool:
@@ -44,6 +48,16 @@ class FalconConfig:
     page_size: int = field(default_factory=lambda: _int("FALCON_PAGE_SIZE", 400))
     # FQL applied to the Spotlight query. Default pulls open findings only.
     filter_fql: str = field(default_factory=lambda: os.getenv("FALCON_FILTER_FQL", "status:!'closed'"))
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("FALCON_RESOLVED_WINDOW_DAYS", 180))
+    # Pull EDR detections / alerts in addition to Spotlight vulnerabilities.
+    # Needs the "Alerts: Read" scope on the Falcon API client. 0 disables.
+    include_detections: bool = field(
+        default_factory=lambda: os.getenv("FALCON_DETECTIONS", "1") == "1")
+    detections_window_days: int = field(
+        default_factory=lambda: _int("FALCON_DETECTIONS_WINDOW_DAYS", 90))
+    detections_page_size: int = field(
+        default_factory=lambda: _int("FALCON_DETECTIONS_PAGE_SIZE", 500))
 
     @property
     def configured(self) -> bool:
@@ -60,6 +74,8 @@ class GitHubConfig:
     include_dependabot: bool = field(default_factory=lambda: os.getenv("GITHUB_DEPENDABOT", "1") == "1")
     include_code_scanning: bool = field(default_factory=lambda: os.getenv("GITHUB_CODE_SCANNING", "1") == "1")
     include_secret_scanning: bool = field(default_factory=lambda: os.getenv("GITHUB_SECRET_SCANNING", "1") == "1")
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("GITHUB_RESOLVED_WINDOW_DAYS", 180))
 
     @property
     def configured(self) -> bool:

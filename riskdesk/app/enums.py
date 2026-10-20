@@ -29,6 +29,7 @@ class FindingCategory(str, Enum):
     DEPENDENCY = "dependency"            # Dependabot / SCA
     CODE_SCANNING = "code_scanning"      # CodeQL / SAST
     SECRET = "secret"                    # Wiz secrets, GH secret scanning
+    DETECTION = "detection"              # Falcon EDR alerts / detections
 
 
 class FindingStatus(str, Enum):

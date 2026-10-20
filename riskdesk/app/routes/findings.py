@@ -30,7 +30,7 @@ from ..schemas import (
     MetaOut, SLABreachReportOut, VerifyOut,
 )
 from ..sync import get_connector
-from .deps import current_user
+from .deps import current_user, parse_date
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
@@ -120,6 +120,55 @@ def facets_endpoint(f: FindingFilter = Depends(_filter_from_query), db=Depends(g
     return get_facets(db, f)
 
 
+@router.get("/findings/remediated")
+def list_remediated(
+    start: str | None = None,
+    end: str | None = None,
+    severity: list[str] = Query(default=[]),
+    source: list[str] = Query(default=[]),
+    category: list[str] = Query(default=[]),
+    status: list[str] = Query(default=[]),
+    verified_only: bool = False,
+    page: int = 1,
+    page_size: int = Query(100, ge=1, le=500),
+    db=Depends(get_session),
+):
+    """List remediated findings for historical reporting. Default scope is
+    every closed finding; narrow with start/end dates and the usual filters."""
+    from ..lifecycle import remediated_findings
+    return remediated_findings(
+        db,
+        start=parse_date(start), end=parse_date(end),
+        severity=severity or None, source=source or None,
+        category=category or None, status=status or None,
+        include_verified_only=verified_only,
+        page=page, page_size=page_size,
+    )
+
+
+@router.post("/findings/import-historical")
+async def import_historical_findings(
+    request: Request, file: UploadFile = File(...), db=Depends(get_session),
+):
+    """Backload remediated findings from a CSV so prior remediation history is
+    reportable. Required columns: canonical_id, source, asset, severity,
+    first_detected, closed_at, status. Optional: cve_id, title, category,
+    component, component_version, source_finding_id, asset_type."""
+    from ..lifecycle import import_historical
+    actor = current_user(request)
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1")
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        from fastapi import HTTPException
+        raise HTTPException(422, "CSV has no data rows.")
+    return import_historical(db, rows, actor)
+
+
 @router.get("/findings/{finding_id}")
 def get_finding(finding_id: int, db=Depends(get_session)):
     from fastapi import HTTPException
@@ -161,6 +210,62 @@ def get_lifecycle_metrics(days: int = Query(90, ge=1, le=730), db=Depends(get_se
     """Remediation flow over a window: opened vs closed, time to close, SLA
     attainment at closure, reopens, verification backlog, ticket drift."""
     return lifecycle_metrics(db, days=days)
+
+
+@router.get("/lifecycle/trends")
+def get_lifecycle_trends(
+    days: int = Query(365, ge=7, le=1825),
+    granularity: str = Query("week", pattern="^(day|week|month|quarter)$"),
+    db=Depends(get_session),
+):
+    """Time series of findings opened, closed, and remaining backlog, bucketed
+    by day/week/month/quarter. Backs the trend chart in the Activity tab."""
+    from ..lifecycle import lifecycle_trends
+    return lifecycle_trends(db, days=days, granularity=granularity)
+
+
+@router.get("/export/remediated.csv")
+def export_remediated(
+    start: str | None = None,
+    end: str | None = None,
+    severity: list[str] = Query(default=[]),
+    source: list[str] = Query(default=[]),
+    category: list[str] = Query(default=[]),
+    db=Depends(get_session),
+):
+    """CSV export of remediated findings for audit/compliance evidence."""
+    from ..lifecycle import remediated_findings
+    data = remediated_findings(
+        db, start=parse_date(start), end=parse_date(end),
+        severity=severity or None, source=source or None,
+        category=category or None, page=1, page_size=100000,
+    )
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "finding_id", "source", "canonical_id", "cve_id", "title", "asset",
+        "asset_type", "category", "severity", "effective_severity", "status",
+        "component", "component_version", "first_detected", "closed_at",
+        "time_to_close_days", "closed_within_sla", "sla_due", "reopened_count",
+        "verified_by", "verified_at", "fix_version",
+    ])
+    for r in data["findings"]:
+        w.writerow([
+            r["finding_id"], r["source"], r["canonical_id"], r["cve_id"] or "",
+            (r["title"] or "").replace("\n", " "), r["asset"],
+            r["asset_type"] or "", r["category"], r["severity"],
+            r["effective_severity"], r["status"], r["component"] or "",
+            r["component_version"] or "", r["first_detected"] or "",
+            r["closed_at"] or "", r["time_to_close_days"] if r["time_to_close_days"] is not None else "",
+            r["closed_within_sla"], r["sla_due"] or "", r["reopened_count"],
+            r["verified_by"] or "", r["verified_at"] or "", r["fix_version"] or "",
+        ])
+    buf.seek(0)
+    stamp = dt.date.today().isoformat()
+    return StreamingResponse(
+        iter([buf.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="remediated-{stamp}.csv"'},
+    )
 
 
 @router.post("/findings/{finding_id}/verify", response_model=VerifyOut)
