@@ -6,7 +6,7 @@ const state = {
   view: 'findings',
   page: 1,
   pageSize: 50,
-  filter: { source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: 'risk' },
+  filter: { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: 'risk' },
   results: null,
   selected: new Set(),
   allMatchingIds: null,     // set when "select all matching" is used
@@ -55,6 +55,16 @@ const DISP_SHORT = {
   accept_risk: 'Accepted', adjust_risk: 'Adjusted', false_positive: 'Not affected',
 };
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const STATUS_ORDER = ['open', 'fixed', 'stale', 'verified_fixed', 'suppressed_at_source'];
+const STATUS_LABEL = {
+  open: 'Open', fixed: 'Fixed — awaiting verification',
+  stale: 'Stale — no longer reported', verified_fixed: 'Verified fixed',
+  suppressed_at_source: 'Suppressed at source',
+};
+const STATUS_SHORT = {
+  fixed: 'Fixed', stale: 'Stale', verified_fixed: 'Verified', suppressed_at_source: 'Suppressed',
+};
+const isClosed = (s) => s && s !== 'open';
 
 function dispLabel(v) {
   const m = (state.meta?.dispositions || []).find((d) => d.value === v);
@@ -67,6 +77,10 @@ function fmtDate(iso) {
 function daysFrom(iso) {
   if (!iso) return null;
   return Math.round((Date.now() - new Date(iso).getTime()) / 86400000);
+}
+function daysBetween(fromIso, toIso) {
+  if (!fromIso || !toIso) return null;
+  return Math.round((new Date(toIso).getTime() - new Date(fromIso).getTime()) / 86400000);
 }
 function daysUntil(iso) {
   if (!iso) return null;
@@ -173,6 +187,7 @@ function refresh() {
 
 function filterParams() {
   const p = new URLSearchParams();
+  (state.filter.status.length ? state.filter.status : STATUS_ORDER).forEach((v) => p.append('status', v));
   state.filter.source.forEach((v) => p.append('source', v));
   state.filter.severity.forEach((v) => p.append('severity', v));
   state.filter.category.forEach((v) => p.append('category', v));
@@ -225,7 +240,7 @@ function renderStats(d) {
 
 function applyQuick(kind) {
   if (kind === 'clear') {
-    state.filter = { source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
+    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
     $('qInput').value = '';
   } else {
     state.filter.quick = state.filter.quick === kind ? null : kind;
@@ -250,6 +265,12 @@ function renderFacets(fac) {
     $(elId).innerHTML = `<div class="micro-label">${title}</div>${rows || '<div class="hint">Nothing matches.</div>'}`;
   };
 
+  const statusCounts = fac.status || {};
+  const statusEntries = STATUS_ORDER
+    .filter((s) => s === 'open' || statusCounts[s] || state.filter.status.includes(s))
+    .map((s) => [s, statusCounts[s] || 0]);
+  block('facetStatus', 'Lifecycle status', 'status', statusEntries, (v) => STATUS_LABEL[v] || v);
+
   const sevEntries = SEV_ORDER.filter((s) => fac.severity[s]).map((s) => [s, fac.severity[s]]);
   block('facetSeverity', 'Effective severity', 'severity', sevEntries,
     (v) => v[0].toUpperCase() + v.slice(1), (v) => gauge(v));
@@ -267,10 +288,10 @@ function renderFacets(fac) {
     (v) => ({
       os_vuln: 'Operating system', cloud_vuln: 'Cloud workload', container: 'Container image',
       misconfiguration: 'Cloud misconfiguration', dependency: 'Dependency',
-      code_scanning: 'Source code', secret: 'Exposed secret',
+      code_scanning: 'Source code', secret: 'Exposed secret', detection: 'EDR detection',
     }[v] || v));
 
-  ['facetSeverity', 'facetSource', 'facetDisposition', 'facetCategory'].forEach((id) => {
+  ['facetStatus', 'facetSeverity', 'facetSource', 'facetDisposition', 'facetCategory'].forEach((id) => {
     $(id).onclick = (e) => {
       const f = e.target.closest('.facet');
       if (!f) return;
@@ -362,8 +383,11 @@ function ticketButton() {
 function rowHtml(f) {
   const d = f.decision;
   const sev = f.risk.effective_severity;
-  const age = daysFrom(f.first_detected);
+  const closed = isClosed(f.status);
+  const age = closed ? daysBetween(f.first_detected, f.closed_at) : daysFrom(f.first_detected);
   const tags = [];
+  if (closed) tags.push(`<span class="tag tag-closed">${esc(STATUS_SHORT[f.status] || f.status)}</span>`);
+  if (f.reopened_count) tags.push(`<span class="tag tag-reopened">Reopened${f.reopened_count > 1 ? ' ×' + f.reopened_count : ''}</span>`);
   if (f.vuln.kev) tags.push('<span class="tag tag-kev">KEV</span>');
   if (f.risk.sla_overdue) tags.push('<span class="tag tag-overdue">Past SLA</span>');
   if (f.has_pending && !d) tags.push('<span class="tag tag-pending">Awaiting approval</span>');
@@ -387,7 +411,7 @@ function rowHtml(f) {
         <span>${sevCell}</span>
         <span>${esc(f.source)}</span>
         ${f.component ? `<span>${esc(f.component)}${f.component_version ? ' ' + esc(f.component_version) : ''}</span>` : ''}
-        ${age !== null ? `<span>${age}d open</span>` : ''}
+        ${age !== null ? `<span>${closed ? `closed after ${age}d` : `${age}d open`}</span>` : ''}
         ${f.fix_available ? '<span>fix published</span>' : ''}
       </div>
     </div>
@@ -526,6 +550,8 @@ async function openDetail(id) {
       ${f.decision_history.length ? `<div class="sec"><h3>Decision history</h3>
         ${f.decision_history.map(historyHtml).join('')}</div>` : ''}
 
+      ${lifecycleHtml(f)}
+
       <div class="sec" id="findingTickets" data-finding-id="${f.id}">
         <h3>Tickets</h3>
         <div id="findingTicketList"><span class="na">Loading…</span></div>
@@ -533,6 +559,42 @@ async function openDetail(id) {
       </div>
     </div>`;
   loadFindingTickets(f.id);
+}
+
+function lifecycleHtml(f) {
+  const kv = (label, value) => value === null || value === undefined || value === ''
+    ? `<dt>${label}</dt><dd class="na">not recorded</dd>` : `<dt>${label}</dt><dd>${esc(value)}</dd>`;
+  const ageDays = daysBetween(f.first_detected, f.closed_at);
+  const closedNote = f.closed_at
+    ? `${fmtDate(f.closed_at)}${ageDays !== null ? ` (${ageDays} days after detection${
+        f.risk.sla_due ? (new Date(f.closed_at) <= new Date(f.risk.sla_due) ? ', within SLA' : ', after SLA') : ''})` : ''}`
+    : null;
+  let action = '';
+  if (f.status === 'fixed' || f.status === 'stale') {
+    action = `<p class="hint" style="margin:10px 0 8px">${f.status === 'stale'
+      ? 'The source stopped reporting this finding, so it is presumed remediated. Confirm the fix before treating it as closed.'
+      : 'The source reports this resolved. Confirm the fix is effective.'}</p>
+      <button class="btn btn-seal" onclick="verifyFinding(${f.id})">Verify fix</button>`;
+  } else if (f.status === 'verified_fixed') {
+    action = `<p style="margin-top:10px">Verified fixed${f.verified_by ? ' by ' + esc(f.verified_by) : ''}${f.verified_at ? ' on ' + fmtDate(f.verified_at) : ''}.</p>`;
+  }
+  const events = f.timeline || [];
+  const timeline = events.length ? `<ul class="timeline" style="margin-top:14px">${events.map((e) => `
+      <li class="tl-item k-${esc(e.kind)} e-${esc(e.event)}">
+        ${esc(e.summary)}
+        <span class="tl-meta">${fmtDate(e.ts)} · ${esc(e.kind)}${e.actor ? ' · ' + esc(e.actor) : ''}${e.note && e.kind === 'status' && e.event !== 'verified' ? ' · ' + esc(e.note) : ''}</span>
+      </li>`).join('')}</ul>` : '';
+  return `<div class="sec">
+    <h3>Lifecycle</h3>
+    <dl class="kv">
+      ${kv('Status', STATUS_LABEL[f.status] || f.status)}
+      ${kv('Closed', closedNote)}
+      ${kv('Times reopened', String(f.reopened_count || 0))}
+      ${kv('Last reported by source', f.last_synced_at ? fmtDate(f.last_synced_at) : null)}
+    </dl>
+    ${action}
+    ${timeline}
+  </div>`;
 }
 
 function stampHtml(d) {
@@ -922,7 +984,15 @@ async function openRegisterDetail(id) {
 // ---------------------------------------------------------------- activity
 
 async function loadActivity() {
-  const rows = await api('/api/audit?limit=300');
+  $('lcWindow').onchange = loadLifecycleMetrics;
+  $('trendGranularity').onchange = loadTrendChart;
+  $('trendWindow').onchange = loadTrendChart;
+  $('loadRemediated').onclick = loadRemediated;
+  $('exportRemediated').onclick = (e) => { e.preventDefault(); window.open(remediatedUrl('/api/export/remediated.csv')); };
+  loadLifecycleMetrics();
+  loadTrendChart();
+  loadRemediated();
+  const rows = (await api('/api/audit?limit=300')).events || [];
   $('auditList').innerHTML = rows.length ? rows.map((e) => `
     <div class="row" style="grid-template-columns:30px 1fr 140px 150px;cursor:default">
       <div class="edge sev-low"></div>
@@ -933,6 +1003,206 @@ async function loadActivity() {
       <div class="row-asset">${esc(e.actor)}</div>
       <div class="row-asset">${new Date(e.ts).toLocaleString()}</div>
     </div>`).join('') : '<div class="empty"><b>Nothing recorded yet.</b></div>';
+}
+
+async function loadLifecycleMetrics() {
+  const el = $('lifecycleMetrics');
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  let m;
+  try { m = await api(`/api/lifecycle/metrics?days=${$('lcWindow').value}`); }
+  catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const n = (v, suffix = '') => (v === null || v === undefined ? '—' : `${v.toLocaleString()}${suffix}`);
+  const net = m.net_change > 0 ? `+${m.net_change}` : String(m.net_change);
+  const tiles = [
+    ['Opened', n(m.opened_in_window), '', null],
+    ['Closed', n(m.closed_in_window), '', null],
+    ['Net backlog change', net, m.net_change > 0 ? 'is-notice' : '', null],
+    ['Mean days to close', n(m.mttr_days), '', null],
+    ['Closed within SLA', n(m.closed_within_sla_pct, '%'), m.closed_within_sla_pct !== null && m.closed_within_sla_pct < 80 ? 'is-notice' : '', null],
+    ['Reopened', n(m.reopened_in_window), m.reopened_in_window ? 'is-seal' : '', null],
+    ['Awaiting verification', n(m.awaiting_verification), '', 'fixed,stale'],
+    ['Tickets out of step', n(m.tickets.resolved_but_findings_open + m.tickets.open_but_findings_closed), '', null],
+  ];
+  const sevRows = SEV_ORDER.filter((s) => m.by_severity[s]).map((s) => {
+    const b = m.by_severity[s];
+    return `<tr><td>${gauge(s)} ${esc(s)}</td><td>${b.closed}</td><td>${b.mttr_days}</td>
+      <td>${b.median_days}</td><td>${b.closed_within_sla_pct === null ? '—' : b.closed_within_sla_pct + '%'}</td></tr>`;
+  }).join('');
+  const drift = m.tickets;
+  const driftList = (rows, label) => rows.length ? `<div class="hint" style="margin:0 18px 6px">${label}:
+    ${rows.map((t) => `<span class="mono">${esc(t.external_id)}</span>`).join(', ')}</div>` : '';
+  el.innerHTML = `
+    <div class="lc-grid">${tiles.map(([label, val, cls, status]) =>
+      `<div class="stat ${cls} ${status ? 'is-clickable' : ''}" ${status ? `data-status="${status}"` : ''}><b>${val}</b><span>${label}</span></div>`).join('')}</div>
+    ${sevRows ? `<table class="lc-table"><thead><tr><th>Severity</th><th>Closed</th><th>Mean days</th><th>Median days</th><th>Within SLA</th></tr></thead><tbody>${sevRows}</tbody></table>`
+      : '<div class="hint" style="margin:0 18px 18px">Nothing closed in this window yet.</div>'}
+    ${driftList(drift.resolved_but_findings_open_sample, 'Tickets resolved while the scanner still reports the finding')}
+    ${driftList(drift.open_but_findings_closed_sample, 'Tickets still open although every linked finding is closed')}`;
+  el.onclick = (e) => {
+    const s = e.target.closest('[data-status]');
+    if (!s) return;
+    state.filter.status = s.dataset.status.split(',');
+    state.page = 1;
+    switchView('findings');
+    loadFindings();
+  };
+}
+
+// ---------------------------------------------------------------- trend chart
+
+async function loadTrendChart() {
+  const el = $('trendChart');
+  el.innerHTML = '<div class="spin">Loading…</div>';
+  let data;
+  try {
+    data = await api(`/api/lifecycle/trends?days=${$('trendWindow').value}&granularity=${$('trendGranularity').value}`);
+  } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  el.innerHTML = renderTrendChart(data);
+}
+
+function renderTrendChart(data) {
+  const series = data.series || [];
+  if (!series.length) return '<div class="hint">No history in this window.</div>';
+  const W = 1120, H = 300, P_L = 44, P_R = 28, P_T = 20, P_B = 54;
+  const inner_w = W - P_L - P_R, inner_h = H - P_T - P_B;
+  const maxFlow = Math.max(1, ...series.map((s) => Math.max(s.opened, s.closed)));
+  const maxBacklog = Math.max(1, ...series.map((s) => s.backlog_end));
+  const n = series.length;
+  const bar_w = Math.max(2, (inner_w / n) * 0.42);
+  const slot = inner_w / n;
+
+  const bars = series.map((s, i) => {
+    const x = P_L + i * slot + slot / 2;
+    const openedH = (s.opened / maxFlow) * inner_h;
+    const closedH = (s.closed / maxFlow) * inner_h;
+    return `
+      <rect x="${x - bar_w - 1}" y="${P_T + inner_h - openedH}" width="${bar_w}" height="${openedH}" fill="var(--seal)" opacity="0.85">
+        <title>${s.bucket_start.slice(0, 10)}: ${s.opened} opened</title></rect>
+      <rect x="${x + 1}" y="${P_T + inner_h - closedH}" width="${bar_w}" height="${closedH}" fill="var(--ink)" opacity="0.75">
+        <title>${s.bucket_start.slice(0, 10)}: ${s.closed} closed</title></rect>`;
+  }).join('');
+
+  const path = series.map((s, i) => {
+    const x = P_L + i * slot + slot / 2;
+    const y = P_T + inner_h - (s.backlog_end / maxBacklog) * inner_h;
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const y = P_T + inner_h - f * inner_h;
+    const label = Math.round(f * maxFlow);
+    return `<line x1="${P_L}" x2="${W - P_R}" y1="${y}" y2="${y}" stroke="var(--rule-soft)"/>
+            <text x="${P_L - 6}" y="${y + 4}" text-anchor="end" font-size="10" fill="var(--slate)">${label}</text>`;
+  }).join('');
+
+  const yTicksR = [0, 0.5, 1].map((f) => {
+    const y = P_T + inner_h - f * inner_h;
+    const label = Math.round(f * maxBacklog);
+    return `<text x="${W - P_R + 6}" y="${y + 4}" font-size="10" fill="var(--slate)">${label}</text>`;
+  }).join('');
+
+  const everyNth = Math.max(1, Math.ceil(n / 10));
+  const xLabels = series.map((s, i) => {
+    if (i % everyNth !== 0 && i !== n - 1) return '';
+    const x = P_L + i * slot + slot / 2;
+    return `<text x="${x}" y="${H - 28}" text-anchor="middle" font-size="10" fill="var(--slate)">${s.bucket_start.slice(0, 10)}</text>`;
+  }).join('');
+
+  const legend = `
+    <g font-size="11" fill="var(--ink)">
+      <rect x="${P_L}" y="${H - 14}" width="10" height="10" fill="var(--seal)" opacity="0.85"/>
+      <text x="${P_L + 15}" y="${H - 5}">Opened</text>
+      <rect x="${P_L + 80}" y="${H - 14}" width="10" height="10" fill="var(--ink)" opacity="0.75"/>
+      <text x="${P_L + 95}" y="${H - 5}">Closed</text>
+      <line x1="${P_L + 160}" y1="${H - 9}" x2="${P_L + 180}" y2="${H - 9}" stroke="var(--notice)" stroke-width="2"/>
+      <text x="${P_L + 185}" y="${H - 5}">Open backlog (right axis)</text>
+    </g>`;
+
+  const summary = `<div style="margin-bottom:8px;font-size:12.5px;color:var(--slate)">
+    <strong>${data.totals.opened.toLocaleString()}</strong> opened,
+    <strong>${data.totals.closed.toLocaleString()}</strong> closed since ${data.start.slice(0, 10)}.
+    Backlog at window start: <strong>${data.baseline_open_at_start.toLocaleString()}</strong>,
+    now: <strong>${(series[series.length - 1]?.backlog_end || 0).toLocaleString()}</strong>.</div>`;
+
+  return summary + `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:360px" xmlns="http://www.w3.org/2000/svg">
+    <text x="${P_L}" y="12" font-size="10" fill="var(--slate)">Findings per ${data.granularity}</text>
+    <text x="${W - P_R}" y="12" text-anchor="end" font-size="10" fill="var(--slate)">Open backlog</text>
+    ${yTicks}
+    ${yTicksR}
+    ${bars}
+    <path d="${path}" fill="none" stroke="var(--notice)" stroke-width="2"/>
+    ${xLabels}
+    ${legend}
+  </svg>`;
+}
+
+// ---------------------------------------------------------------- remediated
+
+function remediatedUrl(base) {
+  const p = new URLSearchParams();
+  if ($('remStart').value) p.set('start', $('remStart').value);
+  if ($('remEnd').value) p.set('end', $('remEnd').value);
+  if ($('remSeverity').value) p.append('severity', $('remSeverity').value);
+  if ($('remSource').value) p.append('source', $('remSource').value);
+  return `${base}?${p}`;
+}
+
+async function loadRemediated() {
+  const el = $('remediatedList');
+  el.innerHTML = '<div class="spin" style="padding:18px">Loading…</div>';
+  let data;
+  try { data = await api(remediatedUrl('/api/findings/remediated') + '&page_size=100'); }
+  catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (data.total === 0) {
+    el.innerHTML = '<div class="hint" style="padding:18px">No remediated findings in this window.</div>';
+    return;
+  }
+  const s = data.summary;
+  const sevChips = Object.entries(s.by_severity).sort((a, b) => SEV_ORDER.indexOf(a[0]) - SEV_ORDER.indexOf(b[0]))
+    .map(([k, v]) => `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+  const srcChips = Object.entries(s.by_source).map(([k, v]) =>
+    `<span class="tag">${esc({wiz: 'Wiz', falcon: 'Falcon', github: 'GitHub'}[k] || k)}: ${v}</span>`).join(' ');
+  const monthChips = Object.entries(s.by_month).map(([k, v]) =>
+    `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+
+  const header = `<div style="padding:0 18px 12px">
+    <div style="font-size:13px;margin-bottom:8px">
+      <strong>${data.total.toLocaleString()}</strong> remediated findings
+      · mean time to close <strong>${s.mean_time_to_close_days ?? '—'}d</strong>
+      · median <strong>${s.median_time_to_close_days ?? '—'}d</strong>
+      · closed within SLA <strong>${s.closed_within_sla_pct ?? '—'}%</strong>
+      (${s.closed_within_sla}/${s.measurable_against_sla})
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${sevChips}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${srcChips}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${monthChips}</div>
+  </div>`;
+
+  const rows = data.findings.map((r) => {
+    const sev = r.effective_severity;
+    const slaClass = r.closed_within_sla ? '' : 'style="color:var(--notice)"';
+    return `<div class="row" style="cursor:pointer" onclick="openDetail(${r.finding_id})">
+      <div class="edge sev-${sev}"></div>
+      <div class="row-check"></div>
+      <div class="row-main">
+        <div class="row-id">${esc(r.canonical_id || '')}</div>
+        <div class="row-title">${esc(r.title || '')}</div>
+        <div class="row-meta">
+          <span>${gauge(sev)} <em>${sev}</em></span>
+          <span>${esc(r.source)}</span>
+          ${r.component ? `<span>${esc(r.component)}</span>` : ''}
+          <span ${slaClass}>closed in ${r.time_to_close_days}d${r.closed_within_sla ? ', within SLA' : ', past SLA'}</span>
+          ${r.reopened_count ? `<span class="tag tag-reopened">reopened ${r.reopened_count}×</span>` : ''}
+        </div>
+      </div>
+      <div class="row-asset">${esc(r.asset || '')}<small>${esc(r.asset_type || '')}</small></div>
+      <div class="row-risk"><div class="score">${fmtDate(r.closed_at)}</div></div>
+      <div class="row-state"><span class="tag tag-closed">${esc(STATUS_SHORT[r.status] || r.status)}</span></div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = header + `<div class="rows">${rows}</div>` +
+    (data.pages > 1 ? `<div class="hint" style="padding:12px 18px">Showing page 1 of ${data.pages}. Use the Export CSV button to pull everything.</div>` : '');
 }
 
 // ---------------------------------------------------------------- sources
@@ -1862,6 +2132,7 @@ async function loadSavedViews() {
 function applySavedView(v) {
   const f = v.filters || {};
   state.filter = {
+    status: f.status || f.statuses || ['open'],
     source: f.sources || [], severity: f.severities || [], category: f.categories || [],
     disposition: f.dispositions || [], quick: f.quick || null,
     q: f.q || '', sort: f.sort || 'risk',
@@ -2094,6 +2365,186 @@ $('wizCopyResult').onclick = wizCopyResult;
 $('wizQueryInput').addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runWizQuery(); }
 });
+
+// ---------------------------------------------------------------- Wiz diagnostics
+
+async function runWizTestSuite() {
+  const btn = $('wizTestSuiteBtn');
+  const el = $('wizTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — this checks config, auth, connectivity, schema, and data probes…</div>';
+
+  try {
+    const res = await api('/api/wiz/test-suite', { method: 'POST' });
+    el.innerHTML = _renderTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${e.message || e}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) extras.push(`API: ${s.config.api_url}`);
+      if (s.total_count != null) extras.push(`Count: ${s.total_count}`);
+      if (s.total_fields != null) extras.push(`${s.total_fields} fields`);
+      if (s.by_severity) extras.push(Object.entries(s.by_severity).map(([k,v]) => `${k}: ${v}`).join(', '));
+      if (s.missing_fields) extras.push(`Missing: ${s.missing_fields.join(', ')}`);
+      if (s.warning) detail += `<div style="color:var(--warning,#e6a700);font-size:12px;margin:2px 0 2px 24px">${_esc(s.warning)}</div>`;
+      if (s.note) extras.push(s.note);
+      if (s.sample) extras.push(`Sample: ${JSON.stringify(s.sample).substring(0, 120)}…`);
+      if (s.mapped_record) extras.push(`Mapped: ${s.mapped_record.canonical_id} → ${s.mapped_record.severity}`);
+      if (s.mapping_error) detail += `<div style="color:var(--danger);font-size:12px;margin:2px 0 2px 24px">Mapping error: ${_esc(s.mapping_error)}</div>`;
+      if (s.raw_node) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw node</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_node, null, 2))}</pre></details>`;
+      }
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+    }
+
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+function _esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+async function runWizDryRun() {
+  const btn = $('wizDryRunBtn');
+  const el = $('wizDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample records from Wiz (no database writes)…</div>';
+
+  try {
+    const res = await api('/api/wiz/dry-run', { method: 'POST' });
+    el.innerHTML = _renderDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${e.message || e}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderDryRun(res) {
+  if (!res.ok) {
+    let html = `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+    if (res.traceback) {
+      html += `<details><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap">${_esc(res.traceback)}</pre></details>`;
+    }
+    return html;
+  }
+
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.fetched}</strong> fetched</span>
+    <span style="color:var(--success)"><strong>${res.mapped}</strong> mapped successfully</span>
+    ${res.mapping_errors ? `<span style="color:var(--danger)"><strong>${res.mapping_errors}</strong> mapping errors</span>` : ''}
+  </div>`;
+
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Mapping errors</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">Node ${_esc(e.node_id || '?')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Asset</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.vuln.canonical_id || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset.name || '')} <span style="color:var(--muted)">${_esc(r.asset.region || '')}</span></td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  if (res.raw_sample) {
+    html += `<details style="margin-top:8px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw API response (first record)</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:300px;overflow:auto">${_esc(JSON.stringify(res.raw_sample, null, 2))}</pre></details>`;
+  }
+
+  return html;
+}
+
+async function loadWizTemplates() {
+  try {
+    const res = await api('/api/wiz/query-templates');
+    const el = $('wizTemplates');
+    if (!res.templates || !res.templates.length) { el.style.display = 'none'; return; }
+    el.innerHTML = res.templates.map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._wizTemplates = res.templates;
+  } catch (e) {
+    // templates are a convenience — fail silently
+  }
+}
+
+function _loadTemplate(name) {
+  const t = (window._wizTemplates || []).find(t => t.name === name);
+  if (!t) return;
+  $('wizQueryInput').value = t.query;
+  $('wizVarsInput').value = t.variables && Object.keys(t.variables).length ? JSON.stringify(t.variables, null, 2) : '{}';
+  toast(`Loaded: ${t.label}`);
+  // scroll the query builder into view
+  $('wizQueryInput').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  $('wizQueryInput').focus();
+}
+
+$('wizTestSuiteBtn').onclick = runWizTestSuite;
+$('wizDryRunBtn').onclick = runWizDryRun;
+
+const _origLoadSources3 = loadSources;
+loadSources = async function() {
+  await _origLoadSources3();
+  loadWizTemplates();
+};
 
 // ---------------------------------------------------------------- settings (tokens + correlation)
 
@@ -2365,7 +2816,8 @@ async function loadTickets() {
 
 function ticketRowHtml(t) {
   const statusCls = t.status === 'resolved' || t.status === 'closed' ? 'sev-low'
-    : t.status === 'in_progress' ? 'sev-medium' : 'sev-high';
+    : t.status === 'in_progress' ? 'sev-medium'
+    : t.status === "won't_fix" ? 'sev-info' : 'sev-high';
   return `<div class="row" data-id="${t.id}" style="cursor:pointer">
     <div class="row-main">
       <div class="row-id mono" style="min-width:120px">
@@ -2428,8 +2880,12 @@ async function openTicketDetail(id) {
 
 async function syncTicket(id) {
   try {
-    const r = await api(`/api/tickets/${id}/sync`, { method: 'POST' });
-    if (r.ok) { toast('Synced from Jira'); openTicketDetail(id); }
+    const res = await fetch(`/api/tickets/${id}/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-RiskDesk-User': currentUser() },
+    });
+    const r = await res.json();
+    if (res.ok && r.ok !== false) { toast('Synced from Jira'); openTicketDetail(id); }
     else toast(r.error || 'Sync failed', true);
   } catch (e) { toast(e.message, true); }
 }
@@ -2444,6 +2900,16 @@ async function updateTicketStatus(id, current) {
     openTicketDetail(id);
     if (state.view === 'tickets') loadTickets();
   } catch (e) { toast(e.message, true); }
+}
+
+async function verifyFinding(id) {
+  const note = prompt('Mark this finding as verified fixed.\nHow was the fix confirmed? (optional)', '');
+  if (note === null) return;
+  try {
+    await api(`/api/findings/${id}/verify`, { method: 'POST', body: JSON.stringify({ note }) });
+    toast('Finding verified as fixed');
+    openDetail(id);
+  } catch (e) { toast(e.message || 'Verification failed', true); }
 }
 
 async function loadFindingTickets(findingId) {
@@ -2466,6 +2932,7 @@ async function loadFindingTickets(findingId) {
 }
 
 function openCreateTicket(findingIds) {
+  $('detail').hidden = true;
   const el = $('decide');
   openDrawer(el);
   el.innerHTML = `
@@ -2537,9 +3004,14 @@ async function _submitTicket(findingIds) {
     payload.external_url = $('ticketExtUrl').value || undefined;
   }
   try {
-    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify(payload) });
-    if (r.ok === false) {
-      $('createTicketError').textContent = r.error;
+    const res = await fetch('/api/tickets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-RiskDesk-User': currentUser() },
+      body: JSON.stringify(payload),
+    });
+    const r = await res.json();
+    if (!res.ok || r.ok === false) {
+      $('createTicketError').textContent = r.error || r.detail || `Error ${res.status}`;
       $('createTicketError').hidden = false;
       return;
     }
@@ -2606,6 +3078,641 @@ async function _submitTicket(findingIds) {
     input.value = '';
   };
 })();
+
+// ---------------------------------------------------------------- Historical remediation import
+
+(function wireHistoricalImport() {
+  const input = $('historicalImportFile');
+  if (!input) return;
+  input.onchange = async () => {
+    const file = input.files[0];
+    if (!file) return;
+    const status = $('historicalImportStatus');
+    status.innerHTML = '<div class="spin">Importing…</div>';
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      const r = await fetch('/api/findings/import-historical', {
+        method: 'POST', body: form, headers: { 'X-RiskDesk-User': currentUser() },
+      });
+      const data = await r.json();
+      if (!r.ok || data.ok === false) {
+        status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Import had errors.</strong>
+          ${data.created || 0} created, ${data.skipped || 0} already existed, ${data.errors || 0} failed.</div>`;
+        const errs = (data.results || []).filter((x) => x.status === 'error').slice(0, 10);
+        if (errs.length) {
+          status.innerHTML += `<pre style="font-size:11px;max-height:200px;overflow:auto">${esc(JSON.stringify(errs, null, 2))}</pre>`;
+        }
+      } else {
+        status.innerHTML = `<div class="hint"><strong>Import successful:</strong>
+          ${data.created} created, ${data.skipped} already existed from ${data.processed} rows.</div>`;
+        toast(`Imported ${data.created} historical findings`);
+      }
+    } catch (e) {
+      status.innerHTML = `<div class="hint" style="color:var(--seal)"><strong>Error:</strong> ${esc(e.message)}</div>`;
+    }
+    input.value = '';
+  };
+})();
+
+// ---------------------------------------------------------------- GitHub Advanced Security diagnostics
+
+let _ghLastResult = null;
+
+async function runGhTestSuite() {
+  const btn = $('ghTestSuiteBtn');
+  const el = $('ghTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — checking config, auth, org access, alert family probes, repos, and sample mapping…</div>';
+  try {
+    const res = await api('/api/github/test-suite', { method: 'POST' });
+    el.innerHTML = _renderGhTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderGhTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) extras.push(`Org: ${s.config.org}, API: ${s.config.api_url}`);
+      if (s.user) extras.push(`User: ${s.user}`);
+      if (s.token_type) extras.push(`Token: ${s.token_type}`);
+      if (s.scopes) extras.push(`Scopes: ${s.scopes}`);
+      if (s.rate_limit) extras.push(`Rate limit remaining: ${s.rate_limit}`);
+      if (s.org_name) extras.push(`Org: ${s.org_display || s.org_name}`);
+      if (s.plan) extras.push(`Plan: ${s.plan}`);
+      if (s.ghas_enabled != null) extras.push(`GHAS for new repos: ${s.ghas_enabled}`);
+      if (s.alerts_in_page != null) extras.push(`Alerts in page: ${s.alerts_in_page}`);
+      if (s.note) extras.push(s.note);
+      if (s.total_fetched != null) extras.push(`Repos fetched: ${s.total_fetched}`);
+      if (s.sample) extras.push(`Sample: ${JSON.stringify(s.sample).substring(0, 150)}`);
+      if (s.family) extras.push(`Family: ${s.family}`);
+      if (s.mapped) extras.push(`Mapped: ${s.mapped.canonical_id} → ${s.mapped.severity}`);
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+      if (s.repos && s.repos.length) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">${s.repos.length} repos</summary>`;
+        detail += '<div style="font-size:11px;color:var(--muted)">';
+        for (const r of s.repos.slice(0, 10)) {
+          detail += `<div>${_esc(r.name)} — GHAS: ${r.advanced_security || '?'}, secrets: ${r.secret_scanning || '?'}, push protection: ${r.secret_scanning_push_protection || '?'}</div>`;
+        }
+        if (s.repos.length > 10) detail += `<div>… and ${s.repos.length - 10} more</div>`;
+        detail += '</div></details>';
+      }
+      if (s.raw_alert) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw alert</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_alert, null, 2))}</pre></details>`;
+      }
+    }
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+async function runGhDryRun() {
+  const btn = $('ghDryRunBtn');
+  const el = $('ghDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample alerts from GitHub (no database writes)…</div>';
+  try {
+    const res = await api('/api/github/dry-run', { method: 'POST' });
+    el.innerHTML = _renderGhDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderGhDryRun(res) {
+  if (!res.ok) {
+    return `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+  }
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.total}</strong> fetched &amp; mapped</span>
+  </div>`;
+
+  if (res.by_family && Object.keys(res.by_family).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:8px">';
+    for (const [fam, count] of Object.entries(res.by_family)) {
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:var(--panel);border:1px solid var(--border)">${_esc(fam)}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Errors (' + res.errors.length + ')</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">${_esc(e.family || '')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Family</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Asset</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.canonical_id || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.family || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+async function loadGhOverview() {
+  const btn = $('ghOverviewBtn');
+  const el = $('ghOverviewResult');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching security overview…</div>';
+  try {
+    const res = await api('/api/github/security-overview');
+    el.innerHTML = _renderGhOverview(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Load Overview';
+}
+
+function _renderGhOverview(res) {
+  if (!res.ok) {
+    return `<div style="color:var(--danger);font-size:13px">${_esc(res.error)}</div>`;
+  }
+  let html = `<div style="font-size:13px;margin-bottom:12px"><strong>Organization:</strong> ${_esc(res.org)}</div>`;
+
+  if (res.families) {
+    html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:16px">';
+    const labels = { dependabot: 'Dependabot', code_scanning: 'Code Scanning', secret_scanning: 'Secret Scanning' };
+    for (const [fam, states] of Object.entries(res.families)) {
+      const openInfo = states.open || {};
+      const fixedInfo = states.fixed || {};
+      const openCount = openInfo.error ? openInfo.error : (openInfo.count || 0) + (openInfo.has_more ? '+' : '');
+      const fixedCount = fixedInfo.error ? fixedInfo.error : (fixedInfo.count || 0) + (fixedInfo.has_more ? '+' : '');
+      html += `<div style="border:1px solid var(--border);border-radius:6px;padding:12px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">${_esc(labels[fam] || fam)}</div>
+        <div style="font-size:12px">Open: <strong>${openCount}</strong></div>
+        <div style="font-size:12px;color:var(--muted)">Fixed: ${fixedCount}</div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.dependabot_by_severity) {
+    html += '<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:600;margin-bottom:6px">Dependabot by severity (open)</div>';
+    html += '<div style="display:flex;gap:8px">';
+    for (const [sev, count] of Object.entries(res.dependabot_by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div></div>';
+  }
+
+  if (res.top_repos && res.top_repos.length) {
+    html += '<div style="font-size:12px;font-weight:600;margin-bottom:6px">Top repos by alert count</div>';
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">Repository</th><th style="padding:4px 8px">Dependabot</th><th style="padding:4px 8px">Code Scanning</th><th style="padding:4px 8px">Secret Scanning</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.top_repos) {
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.repo)}</td>
+        <td style="padding:4px 8px">${r.dependabot}</td>
+        <td style="padding:4px 8px">${r.code_scanning}</td>
+        <td style="padding:4px 8px">${r.secret_scanning}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+  return html;
+}
+
+async function loadGhRepos() {
+  const btn = $('ghReposBtn');
+  const el = $('ghReposResult');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching repos…</div>';
+  try {
+    const res = await api('/api/github/repos');
+    el.innerHTML = _renderGhRepos(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Load Repos';
+}
+
+function _renderGhRepos(res) {
+  if (!res.repos || !res.repos.length) {
+    return '<div class="hint">No repos found.</div>';
+  }
+  let html = `<div style="font-size:12px;margin-bottom:8px"><strong>${res.total}</strong> repos in <strong>${_esc(res.org)}</strong></div>`;
+  html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+  html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+  html += '<th style="padding:4px 8px">Repository</th><th style="padding:4px 8px">Language</th><th style="padding:4px 8px">GHAS</th><th style="padding:4px 8px">Secret Scan</th><th style="padding:4px 8px">Push Protect</th><th style="padding:4px 8px">Dependabot</th><th style="padding:4px 8px">Last Push</th>';
+  html += '</tr></thead><tbody>';
+  for (const r of res.repos) {
+    const ghasColor = r.advanced_security === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const secretColor = r.secret_scanning === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const pushColor = r.push_protection === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    const depColor = r.dependabot_updates === 'enabled' ? 'var(--success)' : 'var(--muted)';
+    html += `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:4px 8px;font-family:monospace">${r.html_url ? `<a href="${_esc(r.html_url)}" target="_blank" rel="noopener">${_esc(r.full_name)}</a>` : _esc(r.full_name)}${r.archived ? ' <span style="color:var(--muted)">(archived)</span>' : ''}</td>
+      <td style="padding:4px 8px">${_esc(r.language || '—')}</td>
+      <td style="padding:4px 8px;color:${ghasColor}">${_esc(r.advanced_security || '—')}</td>
+      <td style="padding:4px 8px;color:${secretColor}">${_esc(r.secret_scanning || '—')}</td>
+      <td style="padding:4px 8px;color:${pushColor}">${_esc(r.push_protection || '—')}</td>
+      <td style="padding:4px 8px;color:${depColor}">${_esc(r.dependabot_updates || '—')}</td>
+      <td style="padding:4px 8px;color:var(--muted)">${r.pushed_at ? fmtDate(r.pushed_at) : '—'}</td>
+    </tr>`;
+  }
+  html += '</tbody></table></div>';
+  return html;
+}
+
+async function runGhQuery() {
+  const path = $('ghQueryPath').value.trim();
+  if (!path) { toast('Enter an API path', true); return; }
+  let params = {};
+  const paramsText = $('ghQueryParams').value.trim();
+  if (paramsText) {
+    try { params = JSON.parse(paramsText); }
+    catch (e) { toast('Params must be valid JSON', true); return; }
+  }
+  $('ghQueryBtn').disabled = true;
+  $('ghQueryBtn').textContent = 'Running…';
+  $('ghQueryStatus').textContent = '';
+  $('ghQueryResult').style.display = 'none';
+  try {
+    const t0 = Date.now();
+    const res = await api('/api/github/query', { method: 'POST', body: JSON.stringify({ method: 'GET', path, params }) });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (!res.ok) {
+      $('ghQueryResult').textContent = JSON.stringify(res.data || res.error, null, 2);
+      $('ghQueryResult').style.display = 'block';
+      $('ghQueryStatus').textContent = `HTTP ${res.status_code} — ${elapsed}s`;
+      $('ghExportJSON').disabled = true;
+      $('ghCopyResult').disabled = true;
+    } else {
+      _ghLastResult = res.data;
+      $('ghQueryResult').textContent = JSON.stringify(res.data, null, 2);
+      $('ghQueryResult').style.display = 'block';
+      $('ghQueryStatus').textContent = `HTTP ${res.status_code} — ${elapsed}s — Rate limit: ${res.headers?.['x-ratelimit-remaining'] || '?'}`;
+      $('ghExportJSON').disabled = false;
+      $('ghCopyResult').disabled = false;
+    }
+  } catch (e) {
+    $('ghQueryResult').textContent = e.message || String(e);
+    $('ghQueryResult').style.display = 'block';
+    $('ghQueryStatus').textContent = 'Query failed';
+    $('ghExportJSON').disabled = true;
+    $('ghCopyResult').disabled = true;
+  }
+  $('ghQueryBtn').disabled = false;
+  $('ghQueryBtn').textContent = 'Run Query';
+}
+
+function ghExportJSON() {
+  if (!_ghLastResult) return;
+  const blob = new Blob([JSON.stringify(_ghLastResult, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'github-query-result.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function ghCopyResult() {
+  const text = $('ghQueryResult').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard'));
+}
+
+$('ghTestSuiteBtn').onclick = runGhTestSuite;
+$('ghDryRunBtn').onclick = runGhDryRun;
+$('ghOverviewBtn').onclick = loadGhOverview;
+$('ghReposBtn').onclick = loadGhRepos;
+$('ghQueryBtn').onclick = runGhQuery;
+$('ghExportJSON').onclick = ghExportJSON;
+$('ghCopyResult').onclick = ghCopyResult;
+
+$('ghQueryPath').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runGhQuery(); }
+});
+
+
+// ===== GitHub query templates ================================================
+
+async function loadGhTemplates() {
+  const el = $('ghTemplates');
+  if (!el) return;
+  try {
+    const res = await api('/api/github/query-templates');
+    el.innerHTML = (res.templates || []).map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadGhTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._ghTemplateData = res.templates;
+  } catch (e) {
+    el.innerHTML = `<span style="font-size:11px;color:var(--muted)">Could not load templates</span>`;
+  }
+}
+
+function _loadGhTemplate(name) {
+  const tpl = (window._ghTemplateData || []).find(t => t.name === name);
+  if (!tpl) return;
+  $('ghQueryPath').value = tpl.path || '';
+  $('ghQueryParams').value = tpl.params ? JSON.stringify(tpl.params, null, 2) : '';
+}
+
+loadGhTemplates();
+
+
+// ===== CrowdStrike Falcon diagnostics ========================================
+
+let _falconLastResult = null;
+
+async function runFalconTestSuite() {
+  const btn = $('falconTestSuiteBtn');
+  const el = $('falconTestSuiteResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Running test suite — checking config, auth, scope, probes, severity breakdown, and sample mapping…</div>';
+  try {
+    const res = await api('/api/falcon/test-suite', { method: 'POST' });
+    el.innerHTML = _renderFalconTestSuite(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Run Test Suite';
+}
+
+function _renderFalconTestSuite(res) {
+  const summary = `<div style="display:flex;gap:12px;margin-bottom:12px;font-size:13px;font-weight:600">
+    <span style="color:var(--success)">${res.passed} passed</span>
+    <span style="color:var(--danger)">${res.failed} failed</span>
+    <span style="color:var(--muted)">${res.skipped} skipped</span>
+  </div>`;
+  const rows = res.steps.map(s => {
+    const icon = s.status === 'pass' ? '✓' : s.status === 'fail' ? '✗' : '—';
+    const color = s.status === 'pass' ? 'var(--success)' : s.status === 'fail' ? 'var(--danger)' : 'var(--muted)';
+    const timing = s.elapsed_s != null ? ` (${s.elapsed_s}s)` : '';
+    let detail = '';
+    if (s.status === 'fail') {
+      detail = `<div style="color:var(--danger);font-size:12px;margin:4px 0 4px 24px;white-space:pre-wrap">${_esc(s.error)}</div>`;
+      if (s.traceback) {
+        detail += `<details style="margin:0 0 4px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;margin:4px 0">${_esc(s.traceback)}</pre></details>`;
+      }
+    } else if (s.status === 'skip') {
+      detail = `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${_esc(s.reason)}</div>`;
+    } else if (s.status === 'pass') {
+      const extras = [];
+      if (s.config) {
+        extras.push(`Base URL: ${s.config.base_url}`);
+        extras.push(`CID prefix: ${s.config.client_id_prefix}`);
+        if (s.config.member_cid) extras.push(`Member CID: ${s.config.member_cid}`);
+        extras.push(`FQL: ${s.config.filter_fql}`);
+      }
+      if (s.token_preview) extras.push(`Token: ${s.token_preview}`);
+      if (s.total_matches != null) extras.push(`Total matching: ${s.total_matches}`);
+      if (s.trace_id) extras.push(`Trace: ${s.trace_id}`);
+      if (s.total != null) extras.push(`Total: ${s.total}`);
+      if (s.returned != null) extras.push(`Returned: ${s.returned}`);
+      if (s.note) extras.push(s.note);
+      if (s.fql) extras.push(`FQL: ${s.fql}`);
+      if (s.matching_count != null) extras.push(`Matching: ${s.matching_count}`);
+      if (s.by_severity) {
+        const sevStr = Object.entries(s.by_severity).map(([k, v]) => `${k}: ${v}`).join(', ');
+        extras.push(`Severities: ${sevStr}`);
+      }
+      if (s.total_open != null) extras.push(`Total open: ${s.total_open}`);
+      if (s.mapped) extras.push(`Mapped: ${s.mapped.canonical_id} → ${s.mapped.severity}`);
+      if (extras.length) detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">${extras.join(' · ')}</div>`;
+      if (s.sample && typeof s.sample === 'object') {
+        const sampleStr = Object.entries(s.sample).filter(([,v]) => v != null).map(([k, v]) => `${k}: ${v}`).join(', ');
+        detail += `<div style="color:var(--muted);font-size:12px;margin:2px 0 2px 24px">Sample: ${_esc(sampleStr)}</div>`;
+      }
+      if (s.raw_resource) {
+        detail += `<details style="margin:2px 0 2px 24px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw resource</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:200px;overflow:auto">${_esc(JSON.stringify(s.raw_resource, null, 2))}</pre></details>`;
+      }
+    }
+    return `<div style="padding:4px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:${color};font-weight:700;width:14px;text-align:center">${icon}</span>
+        <span style="font-size:13px;font-weight:500">${_esc(s.step)}</span>
+        <span style="font-size:12px;color:var(--muted)">${_esc(s.description)}${timing}</span>
+      </div>
+      ${detail}
+    </div>`;
+  }).join('');
+  return summary + '<div style="border:1px solid var(--border);border-radius:6px;padding:8px 12px">' + rows + '</div>';
+}
+
+async function runFalconDryRun() {
+  const btn = $('falconDryRunBtn');
+  const el = $('falconDryRunResult');
+  btn.disabled = true;
+  btn.textContent = 'Running…';
+  el.style.display = 'block';
+  el.innerHTML = '<div style="color:var(--muted)">Fetching sample vulnerabilities from Falcon Spotlight (no database writes)…</div>';
+  try {
+    const res = await api('/api/falcon/dry-run', { method: 'POST' });
+    el.innerHTML = _renderFalconDryRun(res);
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:8px">${_esc(e.message || e)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Dry Run (preview sync)';
+}
+
+function _renderFalconDryRun(res) {
+  if (!res.ok) {
+    let html = `<div style="color:var(--danger);font-size:13px;margin-bottom:8px">${_esc(res.error)}</div>`;
+    if (res.traceback) {
+      html += `<details><summary style="font-size:11px;color:var(--muted);cursor:pointer">Stack trace</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap">${_esc(res.traceback)}</pre></details>`;
+    }
+    return html;
+  }
+  let html = `<div style="display:flex;gap:16px;margin-bottom:12px;font-size:13px">
+    <span><strong>${res.mapped}</strong> mapped of <strong>${res.fetched}</strong> fetched</span>
+    <span style="color:var(--muted)">Total in Falcon: ${res.total_in_falcon != null ? res.total_in_falcon : '?'}</span>
+  </div>`;
+
+  if (res.by_severity && Object.keys(res.by_severity).length) {
+    html += '<div style="display:flex;gap:8px;margin-bottom:12px">';
+    for (const [sev, count] of Object.entries(res.by_severity)) {
+      const color = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[sev] || 'var(--fg)';
+      html += `<span style="font-size:12px;padding:2px 8px;border-radius:4px;background:color-mix(in srgb, ${color} 15%, transparent);color:${color}">${sev}: ${count}</span>`;
+    }
+    html += '</div>';
+  }
+
+  if (res.errors && res.errors.length) {
+    html += '<details style="margin-bottom:8px"><summary style="font-size:12px;color:var(--danger);cursor:pointer">Mapping errors (' + res.errors.length + ')</summary>';
+    html += res.errors.map(e => `<div style="font-size:12px;padding:2px 0;color:var(--muted)">Resource ${_esc(e.resource_id || '?')}: ${_esc(e.error)}</div>`).join('');
+    html += '</details>';
+  }
+
+  if (res.records && res.records.length) {
+    html += '<div style="overflow-x:auto"><table style="width:100%;font-size:12px;border-collapse:collapse">';
+    html += '<thead><tr style="text-align:left;border-bottom:2px solid var(--border)">';
+    html += '<th style="padding:4px 8px">CVE / ID</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Hostname</th><th style="padding:4px 8px">OS</th><th style="padding:4px 8px">Component</th><th style="padding:4px 8px">Fix</th>';
+    html += '</tr></thead><tbody>';
+    for (const r of res.records) {
+      const sevColor = {critical:'var(--danger)',high:'#e65100',medium:'var(--warning,#e6a700)',low:'var(--success)',info:'var(--muted)'}[r.severity] || 'var(--fg)';
+      html += `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;font-family:monospace">${_esc(r.vuln?.canonical_id || '')}</td>
+        <td style="padding:4px 8px;color:${sevColor}">${_esc(r.severity)}</td>
+        <td style="padding:4px 8px">${_esc(r.asset?.name || '')}</td>
+        <td style="padding:4px 8px;color:var(--muted)">${_esc(r.asset?.os || '')}</td>
+        <td style="padding:4px 8px">${_esc(r.component || '—')}</td>
+        <td style="padding:4px 8px">${r.fix_available ? _esc(r.fix_version || 'yes') : '—'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  if (res.raw_sample) {
+    html += `<details style="margin-top:8px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">Raw API response (first record)</summary><pre style="font-size:11px;color:var(--muted);white-space:pre-wrap;max-height:300px;overflow:auto">${_esc(JSON.stringify(res.raw_sample, null, 2))}</pre></details>`;
+  }
+  return html;
+}
+
+async function loadFalconTemplates() {
+  const el = $('falconTemplates');
+  if (!el) return;
+  try {
+    const res = await api('/api/falcon/query-templates');
+    el.innerHTML = (res.templates || []).map(t =>
+      `<button class="btn-ghost" style="font-size:11px;padding:3px 10px" onclick='_loadFalconTemplate(${JSON.stringify(t.name)})' title="${_esc(t.description)}">${_esc(t.label)}</button>`
+    ).join('');
+    window._falconTemplateData = res.templates;
+  } catch (e) {
+    el.innerHTML = `<span style="font-size:11px;color:var(--muted)">Could not load templates</span>`;
+  }
+}
+
+function _loadFalconTemplate(name) {
+  const tpl = (window._falconTemplateData || []).find(t => t.name === name);
+  if (!tpl) return;
+  $('falconQueryFilter').value = tpl.filter || '';
+  $('falconQueryLimit').value = tpl.limit || 5;
+}
+
+async function runFalconQuery() {
+  const filter = $('falconQueryFilter').value.trim();
+  if (!filter) { toast('Enter an FQL filter', true); return; }
+  const limit = parseInt($('falconQueryLimit').value) || 5;
+  $('falconQueryBtn').disabled = true;
+  $('falconQueryBtn').textContent = 'Running…';
+  $('falconQueryStatus').textContent = '';
+  $('falconQueryResult').style.display = 'none';
+  try {
+    const t0 = Date.now();
+    const res = await api('/api/falcon/query', { method: 'POST', body: JSON.stringify({ filter, limit }) });
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    if (!res.ok) {
+      $('falconQueryResult').textContent = JSON.stringify(res.error || res, null, 2);
+      $('falconQueryResult').style.display = 'block';
+      $('falconQueryStatus').textContent = `Error — ${elapsed}s`;
+      $('falconExportJSON').disabled = true;
+      $('falconCopyResult').disabled = true;
+    } else {
+      _falconLastResult = res;
+      const meta = res.meta || {};
+      const total = (meta.pagination || {}).total;
+      $('falconQueryResult').textContent = JSON.stringify(res.resources || res, null, 2);
+      $('falconQueryResult').style.display = 'block';
+      $('falconQueryStatus').textContent = `${(res.resources || []).length} returned${total != null ? ` of ${total} total` : ''} — ${elapsed}s`;
+      $('falconExportJSON').disabled = false;
+      $('falconCopyResult').disabled = false;
+    }
+  } catch (e) {
+    $('falconQueryResult').textContent = e.message || String(e);
+    $('falconQueryResult').style.display = 'block';
+    $('falconQueryStatus').textContent = 'Query failed';
+    $('falconExportJSON').disabled = true;
+    $('falconCopyResult').disabled = true;
+  }
+  $('falconQueryBtn').disabled = false;
+  $('falconQueryBtn').textContent = 'Run Query';
+}
+
+function falconExportJSON() {
+  if (!_falconLastResult) return;
+  const blob = new Blob([JSON.stringify(_falconLastResult, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'falcon-query-result.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function falconCopyResult() {
+  const text = $('falconQueryResult').textContent;
+  navigator.clipboard.writeText(text).then(() => toast('Copied to clipboard'));
+}
+
+$('falconTestSuiteBtn').onclick = runFalconTestSuite;
+$('falconDryRunBtn').onclick = runFalconDryRun;
+$('falconQueryBtn').onclick = runFalconQuery;
+$('falconExportJSON').onclick = falconExportJSON;
+$('falconCopyResult').onclick = falconCopyResult;
+
+$('falconQueryFilter').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runFalconQuery(); }
+});
+
+loadFalconTemplates();
+
 
 boot().catch((e) => {
   document.body.innerHTML = `<div class="empty" style="padding-top:120px">

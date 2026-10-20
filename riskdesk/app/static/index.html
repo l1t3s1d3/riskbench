@@ -66,6 +66,7 @@
         </div>
       </div>
 
+      <div class="rail-block" id="facetStatus"></div>
       <div class="rail-block" id="facetSource"></div>
       <div class="rail-block" id="facetSeverity"></div>
       <div class="rail-block" id="facetDisposition"></div>
@@ -135,6 +136,67 @@
 <!-- ============================ ACTIVITY ============================ -->
 <main id="view-activity" class="view" hidden>
   <section class="pane wide">
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Remediation lifecycle</span></div>
+      <div class="toolbar-right">
+        <label class="micro" for="lcWindow">Window</label>
+        <select id="lcWindow" class="field-sm">
+          <option value="30">30 days</option>
+          <option value="90" selected>90 days</option>
+          <option value="180">180 days</option>
+          <option value="365">365 days</option>
+        </select>
+      </div>
+    </div>
+    <div id="lifecycleMetrics"></div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Opened vs closed over time</span></div>
+      <div class="toolbar-right">
+        <label class="micro" for="trendGranularity">Bucket</label>
+        <select id="trendGranularity" class="field-sm">
+          <option value="week" selected>Weekly</option>
+          <option value="month">Monthly</option>
+          <option value="quarter">Quarterly</option>
+          <option value="day">Daily</option>
+        </select>
+        <label class="micro" for="trendWindow">Window</label>
+        <select id="trendWindow" class="field-sm">
+          <option value="90">90 days</option>
+          <option value="180">180 days</option>
+          <option value="365" selected>1 year</option>
+          <option value="730">2 years</option>
+        </select>
+      </div>
+    </div>
+    <div id="trendChart" style="padding:0 18px 18px"></div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Remediated findings</span></div>
+      <div class="toolbar-right">
+        <label class="micro" for="remStart">From</label>
+        <input type="date" id="remStart" class="field-sm">
+        <label class="micro" for="remEnd">To</label>
+        <input type="date" id="remEnd" class="field-sm">
+        <select id="remSeverity" class="field-sm">
+          <option value="">All severities</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+        <select id="remSource" class="field-sm">
+          <option value="">All sources</option>
+          <option value="wiz">Wiz</option>
+          <option value="falcon">CrowdStrike Falcon</option>
+          <option value="github">GitHub</option>
+        </select>
+        <button id="loadRemediated" class="btn">Load</button>
+        <a id="exportRemediated" class="btn-ghost" href="#">Export CSV</a>
+      </div>
+    </div>
+    <div id="remediatedList"></div>
+
     <div class="toolbar"><div class="toolbar-left"><span class="count">Audit trail</span></div></div>
     <div id="auditList" class="rows"></div>
   </section>
@@ -228,10 +290,166 @@
         </label>
       </div>
     </div>
-    <div id="wizImportStatus" style="padding:0 18px 12px">
+    <div style="padding:0 18px 12px">
       <div class="hint">Upload a Wiz vulnerability export (JSON). Accepts the format from Wiz Reports,
       the GraphQL query builder output, or a raw <code>{"findings": [...]}</code> array.
       This bypasses the live API and lets you validate schema mapping before configuring the connector.</div>
+      <div id="wizImportStatus" style="margin-top:8px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Historical remediation import</span></div>
+      <div class="toolbar-right">
+        <label class="btn" style="cursor:pointer">
+          Import CSV
+          <input type="file" id="historicalImportFile" accept=".csv" hidden>
+        </label>
+      </div>
+    </div>
+    <div style="padding:0 18px 12px">
+      <div class="hint">Backload remediated findings from a CSV so prior remediation history is reportable.
+      Required columns: <code>canonical_id, source, asset, severity, first_detected, closed_at, status</code>.
+      Optional: <code>cve_id, title, category, component, component_version, source_finding_id, asset_type</code>.
+      <code>status</code> is one of fixed / verified_fixed / stale / suppressed_at_source.
+      Dates in ISO 8601 (<code>2026-04-12</code> or <code>2026-04-12T15:00:00Z</code>).</div>
+      <div id="historicalImportStatus" style="margin-top:8px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">CrowdStrike Falcon Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="falconDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="falconTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="falconDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, OAuth authentication,
+        Spotlight scope, data probes, severity breakdown, and sample mapping.
+        The dry run fetches records without writing to the database.
+      </div>
+      <div id="falconTestSuiteResult" style="display:none"></div>
+      <div id="falconDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">FQL query templates</span></div>
+      </div>
+      <div id="falconTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Falcon FQL Query Explorer</span></div>
+      <div class="toolbar-right">
+        <button id="falconQueryBtn" class="btn">Run Query</button>
+      </div>
+    </div>
+    <div id="falconQueryBuilder" style="padding:0 18px 12px;margin-bottom:24px">
+      <div style="display:flex;gap:12px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">FQL Filter</label>
+          <input id="falconQueryFilter" class="field mono" style="font-size:13px" placeholder="status:!'closed'" value="status:!'closed'">
+        </div>
+        <div style="width:160px">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">Limit</label>
+          <input id="falconQueryLimit" class="field mono" type="number" style="font-size:13px" value="5" min="1" max="100">
+        </div>
+      </div>
+      <div id="falconQueryStatus" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="falconExportJSON" class="btn-ghost" style="font-size:12px" disabled>Export JSON</button>
+        <button id="falconCopyResult" class="btn-ghost" style="font-size:12px" disabled>Copy to Clipboard</button>
+      </div>
+      <pre id="falconQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Advanced Security Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="ghDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="ghTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="ghDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, token auth, org access,
+        Dependabot / Code Scanning / Secret Scanning alert probes, repo listing,
+        and sample alert mapping. The dry run fetches records without writing to the database.
+      </div>
+      <div id="ghTestSuiteResult" style="display:none"></div>
+      <div id="ghDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">API call templates</span></div>
+      </div>
+      <div id="ghTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Security Overview</span></div>
+      <div class="toolbar-right">
+        <button id="ghOverviewBtn" class="btn-ghost">Load Overview</button>
+      </div>
+    </div>
+    <div id="ghOverview" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:8px">
+        Org-wide GHAS coverage: alert counts by family, severity breakdown, and top repos.
+      </div>
+      <div id="ghOverviewResult" style="display:none"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub Repos &amp; GHAS Enablement</span></div>
+      <div class="toolbar-right">
+        <button id="ghReposBtn" class="btn-ghost">Load Repos</button>
+      </div>
+    </div>
+    <div id="ghRepos" style="padding:0 18px 12px">
+      <div id="ghReposResult" style="display:none"></div>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">GitHub API Explorer</span></div>
+      <div class="toolbar-right">
+        <button id="ghQueryBtn" class="btn">Run Query</button>
+      </div>
+    </div>
+    <div id="ghQueryBuilder" style="padding:0 18px 12px;margin-bottom:24px">
+      <div style="display:flex;gap:12px;margin-bottom:8px;align-items:flex-end">
+        <div style="flex:1">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">API Path</label>
+          <input id="ghQueryPath" class="field mono" style="font-size:13px" placeholder="/orgs/{org}/dependabot/alerts" value="/orgs/{org}/dependabot/alerts">
+        </div>
+        <div style="width:280px">
+          <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:var(--muted)">Query Parameters (JSON)</label>
+          <textarea id="ghQueryParams" class="field" rows="3" style="font-family:monospace;font-size:13px;resize:vertical" placeholder='{"per_page": 5, "state": "open"}'></textarea>
+        </div>
+      </div>
+      <div id="ghQueryStatus" style="font-size:12px;color:var(--muted);margin-bottom:4px"></div>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <button id="ghExportJSON" class="btn-ghost" style="font-size:12px" disabled>Export JSON</button>
+        <button id="ghCopyResult" class="btn-ghost" style="font-size:12px" disabled>Copy to Clipboard</button>
+      </div>
+      <pre id="ghQueryResult" class="field" style="max-height:500px;overflow:auto;font-size:12px;font-family:monospace;white-space:pre-wrap;display:none"></pre>
+    </div>
+
+    <div class="toolbar">
+      <div class="toolbar-left"><span class="count">Wiz Connection Diagnostics</span></div>
+      <div class="toolbar-right">
+        <button id="wizDryRunBtn" class="btn-ghost">Dry Run (preview sync)</button>
+        <button id="wizTestSuiteBtn" class="btn">Run Test Suite</button>
+      </div>
+    </div>
+    <div id="wizDiagnostics" style="padding:0 18px 12px">
+      <div class="hint" style="margin-bottom:12px">
+        Run the test suite to check every layer: env vars, OAuth authentication,
+        GraphQL connectivity, schema validation, and data probes. The dry run fetches
+        a handful of records without writing to the database so you can verify the
+        full pipeline.
+      </div>
+      <div id="wizTestSuiteResult" style="display:none"></div>
+      <div id="wizDryRunResult" style="display:none"></div>
+      <div class="toolbar" style="padding:0;margin-top:12px">
+        <div class="toolbar-left"><span class="count" style="font-size:11px">Query templates</span></div>
+      </div>
+      <div id="wizTemplates" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
     </div>
 
     <div class="toolbar">

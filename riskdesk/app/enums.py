@@ -29,13 +29,27 @@ class FindingCategory(str, Enum):
     DEPENDENCY = "dependency"            # Dependabot / SCA
     CODE_SCANNING = "code_scanning"      # CodeQL / SAST
     SECRET = "secret"                    # Wiz secrets, GH secret scanning
+    DETECTION = "detection"              # Falcon EDR alerts / detections
 
 
 class FindingStatus(str, Enum):
     OPEN = "open"
     FIXED = "fixed"
+    VERIFIED_FIXED = "verified_fixed"
     SUPPRESSED_AT_SOURCE = "suppressed_at_source"
     STALE = "stale"          # not seen in the last N syncs
+
+
+# Statuses that end the remediation clock. Stale counts as closed (presumed
+# remediated: the source stopped reporting it) but is still verifiable, and
+# reopens if the source reports it again.
+CLOSED_STATUSES = {
+    FindingStatus.FIXED.value,
+    FindingStatus.VERIFIED_FIXED.value,
+    FindingStatus.STALE.value,
+    FindingStatus.SUPPRESSED_AT_SOURCE.value,
+}
+VERIFIABLE_STATUSES = {FindingStatus.FIXED.value, FindingStatus.STALE.value}
 
 
 class Disposition(str, Enum):

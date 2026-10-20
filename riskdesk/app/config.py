@@ -27,6 +27,10 @@ class WizConfig:
     auth_url: str = field(default_factory=lambda: os.getenv("WIZ_AUTH_URL", "https://auth.app.wiz.io/oauth/token"))
     audience: str = field(default_factory=lambda: os.getenv("WIZ_AUDIENCE", "wiz-api"))
     page_size: int = field(default_factory=lambda: _int("WIZ_PAGE_SIZE", 500))
+    # How far back to pull resolved findings so historical remediation data
+    # survives in RiskDesk. 0 disables the resolved-pull pass.
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("WIZ_RESOLVED_WINDOW_DAYS", 180))
 
     @property
     def configured(self) -> bool:
@@ -44,6 +48,16 @@ class FalconConfig:
     page_size: int = field(default_factory=lambda: _int("FALCON_PAGE_SIZE", 400))
     # FQL applied to the Spotlight query. Default pulls open findings only.
     filter_fql: str = field(default_factory=lambda: os.getenv("FALCON_FILTER_FQL", "status:!'closed'"))
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("FALCON_RESOLVED_WINDOW_DAYS", 180))
+    # Pull EDR detections / alerts in addition to Spotlight vulnerabilities.
+    # Needs the "Alerts: Read" scope on the Falcon API client. 0 disables.
+    include_detections: bool = field(
+        default_factory=lambda: os.getenv("FALCON_DETECTIONS", "1") == "1")
+    detections_window_days: int = field(
+        default_factory=lambda: _int("FALCON_DETECTIONS_WINDOW_DAYS", 90))
+    detections_page_size: int = field(
+        default_factory=lambda: _int("FALCON_DETECTIONS_PAGE_SIZE", 500))
 
     @property
     def configured(self) -> bool:
@@ -60,6 +74,8 @@ class GitHubConfig:
     include_dependabot: bool = field(default_factory=lambda: os.getenv("GITHUB_DEPENDABOT", "1") == "1")
     include_code_scanning: bool = field(default_factory=lambda: os.getenv("GITHUB_CODE_SCANNING", "1") == "1")
     include_secret_scanning: bool = field(default_factory=lambda: os.getenv("GITHUB_SECRET_SCANNING", "1") == "1")
+    resolved_window_days: int = field(
+        default_factory=lambda: _int("GITHUB_RESOLVED_WINDOW_DAYS", 180))
 
     @property
     def configured(self) -> bool:
@@ -92,11 +108,29 @@ class Policy:
 
 
 @dataclass
+class NotificationConfig:
+    """SLA breach notification channels."""
+    slack_webhook_url: str = field(default_factory=lambda: os.getenv("RISKDESK_SLACK_WEBHOOK", ""))
+    email_smtp_host: str = field(default_factory=lambda: os.getenv("RISKDESK_SMTP_HOST", ""))
+    email_smtp_port: int = field(default_factory=lambda: _int("RISKDESK_SMTP_PORT", 587))
+    email_from: str = field(default_factory=lambda: os.getenv("RISKDESK_EMAIL_FROM", ""))
+    email_to: list[str] = field(default_factory=lambda: _list("RISKDESK_EMAIL_TO"))
+    sla_check_enabled: bool = field(
+        default_factory=lambda: os.getenv("RISKDESK_SLA_CHECK_ENABLED", "1") == "1"
+    )
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.slack_webhook_url or (self.email_smtp_host and self.email_from))
+
+
+@dataclass
 class Settings:
     wiz: WizConfig = field(default_factory=WizConfig)
     falcon: FalconConfig = field(default_factory=FalconConfig)
     github: GitHubConfig = field(default_factory=GitHubConfig)
     policy: Policy = field(default_factory=Policy)
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     # Local identity. This build has no SSO; the current user is whoever the
     # browser session says it is, chosen from this roster. See README.
@@ -129,4 +163,5 @@ def reload_settings() -> Settings:
     settings.default_user = fresh.default_user
     settings.org_name = fresh.org_name
     settings.stale_after_days = fresh.stale_after_days
+    settings.notifications = fresh.notifications
     return settings

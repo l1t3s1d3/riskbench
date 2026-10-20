@@ -48,3 +48,44 @@ def get_session():
 def init_db():
     from . import models  # noqa: F401  (registers tables)
     Base.metadata.create_all(engine)
+    add_missing_columns(engine)
+
+
+def add_missing_columns(bind) -> list[str]:
+    """Additive-only migration: ALTER TABLE ADD COLUMN for model columns the
+    database lacks. create_all creates new tables but never alters existing ones."""
+    import logging
+
+    from sqlalchemy import inspect, text
+
+    insp = inspect(bind)
+    existing_tables = set(insp.get_table_names())
+    added: list[str] = []
+    with bind.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            new_cols = set()
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                ddl = f"ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(dialect=bind.dialect)}"
+                default = col.default.arg if col.default is not None and col.default.is_scalar else None
+                if default is not None:
+                    literal = int(default) if isinstance(default, bool) else default
+                    ddl += f" NOT NULL DEFAULT {literal!r}" if not col.nullable else f" DEFAULT {literal!r}"
+                elif not col.nullable:
+                    logging.warning("Cannot add NOT NULL column %s.%s without a default", table.name, col.name)
+                    continue
+                conn.execute(text(ddl))
+                added.append(f"{table.name}.{col.name}")
+                new_cols.add(col.name)
+            present = have | new_cols
+            for idx in table.indexes:
+                cols = {c.name for c in idx.columns}
+                if cols & new_cols and cols <= present:
+                    idx.create(conn, checkfirst=True)
+    if added:
+        logging.info("Schema migration added columns: %s", ", ".join(added))
+    return added

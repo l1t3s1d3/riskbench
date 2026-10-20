@@ -238,13 +238,18 @@ def _create_adjudication_from_exception(
         days = exc.requested_duration_days or 90
         expires_at = utcnow() + dt.timedelta(days=days)
 
-    # The security reviewer who approves is the actor. The adjudication needs
-    # a *different* person as approver if require_separate_approver is on.
-    adj_approver = approver
-    if not adj_approver or adj_approver == actor:
-        # Pick someone from the approver roster who isn't the reviewer
-        candidates = [a for a in settings.approvers if a != actor]
-        adj_approver = candidates[0] if candidates else actor
+    # The submitter is the requester and the reviewer is the approver. The
+    # decision is only approved here when the reviewer may approve it; otherwise
+    # it waits for a named approver rather than recording a sign-off nobody gave.
+    reviewer_can_approve = actor in settings.approvers and not (
+        settings.policy.require_separate_approver and actor == exc.submitted_by)
+    if approver and approver != actor:
+        adj_approver, approve_now = approver, False
+    elif reviewer_can_approve:
+        adj_approver, approve_now = actor, True
+    else:
+        candidates = [a for a in settings.approvers if a not in (actor, exc.submitted_by)]
+        adj_approver, approve_now = (candidates[0] if candidates else None), False
 
     try:
         adjs = create_decisions(
@@ -254,26 +259,22 @@ def _create_adjudication_from_exception(
             justification=(
                 f"Exception #{exc.id}: {exc.justification}\n"
                 f"Business impact: {exc.business_impact or 'not stated'}\n"
-                f"Submitted by: {exc.submitted_by}"
+                f"Submitted by: {exc.submitted_by}; reviewed by: {actor}"
                 + (f"\nCompensating controls: {exc.compensating_controls}" if exc.compensating_controls else "")
             ),
-            actor=actor,
+            actor=exc.submitted_by,
             scope=exc.scope,
             approver=adj_approver,
             expires_at=expires_at,
             adjusted_severity=exc.adjusted_severity,
             compensating_controls=exc.compensating_controls,
         )
-        # Auto-approve the adjudication since the security reviewer just approved
-        if adjs and adj_approver in settings.approvers:
+        if approve_now:
             from .adjudication import decide
             for adj in adjs:
                 if adj.state == "pending_approval":
-                    try:
-                        decide(db, adj.id, True, adj_approver,
-                               note=f"Auto-approved from exception #{exc.id}")
-                    except PolicyError:
-                        pass  # self-approve guard; leave pending for another approver
+                    decide(db, adj.id, True, actor,
+                           note=f"Approved through review of exception #{exc.id}")
         return adjs[0] if adjs else None
     except PolicyError as e:
         # Log the failure but don't block the exception approval

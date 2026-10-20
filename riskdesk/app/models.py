@@ -49,17 +49,42 @@ class Asset(Base):
     internet_facing = Column(Boolean, nullable=True)
     data_classification = Column(String(64), nullable=True)
 
+    business_unit = Column(String(256), nullable=True, index=True)
+    asset_group_id = Column(Integer, ForeignKey("asset_groups.id"), nullable=True, index=True)
+
     owner = Column(String(256))
     tags = Column(JSON, default=dict)
     first_seen = Column(DateTime, default=utcnow)
     last_seen = Column(DateTime, default=utcnow)
 
     findings = relationship("Finding", back_populates="asset")
+    group = relationship("AssetGroup", back_populates="assets")
 
     __table_args__ = (
         UniqueConstraint("source", "source_asset_id", name="uq_asset_source"),
         Index("ix_asset_name", "name"),
     )
+
+
+class AssetGroup(Base):
+    """Logical grouping of assets by business unit, team, or function.
+
+    Lets you scope decisions, reports, and SLA tracking by organizational unit
+    instead of individual assets.
+    """
+    __tablename__ = "asset_groups"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(256), nullable=False, unique=True)
+    description = Column(Text)
+    business_unit = Column(String(256), index=True)
+    owner = Column(String(256))
+    criticality = Column(String(32), default="medium")
+    tags = Column(JSON, default=dict)
+    created_by = Column(String(256))
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    assets = relationship("Asset", back_populates="group")
 
 
 class Vuln(Base):
@@ -114,8 +139,16 @@ class Finding(Base):
     fix_version = Column(String(256))
 
     first_detected = Column(DateTime, default=utcnow, index=True)
+    # last_seen is the source's own timestamp; last_synced_at is when a RiskDesk
+    # sync last received this finding. Staleness keys off the latter, because
+    # sources report "last updated", which can be months old on a live alert.
     last_seen = Column(DateTime, default=utcnow, index=True)
+    last_synced_at = Column(DateTime, nullable=True, index=True)
     closed_at = Column(DateTime, nullable=True)
+    reopened_count = Column(Integer, default=0, nullable=False)
+
+    verified_by = Column(String(256), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
 
     source_url = Column(String(1024))
     raw = Column(JSON, default=dict)        # untouched source payload
@@ -127,6 +160,21 @@ class Finding(Base):
         UniqueConstraint("source", "source_finding_id", name="uq_finding_source"),
         Index("ix_finding_triage", "status", "severity", "source"),
     )
+
+
+class FindingEvent(Base):
+    """One status transition in a finding's lifecycle (fixed, stale, reopened,
+    verified). First detection is not stored here; it is Finding.first_detected."""
+    __tablename__ = "finding_events"
+    id = Column(Integer, primary_key=True)
+    finding_id = Column(Integer, ForeignKey("findings.id"), nullable=False, index=True)
+    ts = Column(DateTime, default=utcnow, nullable=False, index=True)
+    event = Column(String(32), nullable=False, index=True)
+    from_status = Column(String(32))
+    to_status = Column(String(32))
+    actor = Column(String(256), nullable=False)
+    sync_run_id = Column(Integer, ForeignKey("sync_runs.id"), nullable=True)
+    note = Column(String(1024))
 
 
 class Adjudication(Base):
@@ -171,6 +219,9 @@ class Adjudication(Base):
 
     review_due = Column(DateTime, nullable=True, index=True)   # next periodic review
     expires_at = Column(DateTime, nullable=True, index=True)   # decision lapses
+    # A renewal points at the decision it replaces. The predecessor stays in
+    # force until the renewal is approved, so coverage never gaps.
+    supersedes_id = Column(Integer, ForeignKey("adjudications.id"), nullable=True)
 
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -582,6 +633,18 @@ class ConnectorConfig(Base):
 # Ticket tracking (Jira integration)
 # =========================================================================
 
+class TicketFinding(Base):
+    """Join table linking tickets to findings (replaces JSON array)."""
+    __tablename__ = "ticket_findings"
+    id = Column(Integer, primary_key=True)
+    ticket_id = Column(Integer, ForeignKey("tickets.id", ondelete="CASCADE"), nullable=False, index=True)
+    finding_id = Column(Integer, ForeignKey("findings.id"), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("ticket_id", "finding_id", name="uq_ticket_finding"),
+    )
+
+
 class Ticket(Base):
     """An external ticket (Jira, ServiceNow, etc.) linked to one or more findings.
 
@@ -603,7 +666,6 @@ class Ticket(Base):
     assignee = Column(String(256))
     reporter = Column(String(256))
 
-    finding_ids = Column(JSON, default=list)     # list of finding.id values this ticket covers
     vuln_ids = Column(JSON, default=list)        # list of vuln canonical_ids for grouping context
     finding_count = Column(Integer, default=0)
     severity = Column(String(16))                # highest severity among linked findings
@@ -613,6 +675,8 @@ class Ticket(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     resolved_at = Column(DateTime, nullable=True)
     synced_at = Column(DateTime, nullable=True)  # last time status was synced from external
+
+    ticket_findings = relationship("TicketFinding", backref="ticket", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_ticket_status", "status", "provider"),

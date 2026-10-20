@@ -22,7 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from .config import settings
-from .enums import SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
+from .enums import CLOSED_STATUSES, SCOPE_PRECEDENCE, Disposition, ScopeType, Severity
 from .models import Adjudication, Finding, utcnow
 
 
@@ -148,14 +148,32 @@ def compute_risk(finding: Finding, adj: Adjudication | None,
     else:
         factors.append(Factor("CISA KEV listed", True, 0, "Not on the KEV catalog"))
 
-    # EPSS - probability of exploitation. Not currently fed.
+    # EPSS - probability of exploitation, scaled by percentile when available.
     if v and v.epss_score is not None:
-        pts = round(min(v.epss_score, 1.0) * 15, 1)
+        epss = min(v.epss_score, 1.0)
+        if epss >= 0.7:
+            pts = 15.0
+        elif epss >= 0.4:
+            pts = round(10.0 + (epss - 0.4) / 0.3 * 5.0, 1)
+        else:
+            pts = round(epss / 0.4 * 10.0, 1)
         score += pts
-        factors.append(Factor("EPSS probability", True, pts, f"EPSS {v.epss_score:.3f}"))
+        pct_note = f", {v.epss_percentile:.0%} percentile" if v.epss_percentile else ""
+        factors.append(Factor("EPSS probability", True, pts, f"EPSS {epss:.3f}{pct_note}"))
     else:
         factors.append(Factor("EPSS probability", False, 0, "No EPSS feed connected"))
         unknown.append("EPSS score")
+
+    # KEV + EPSS synergy: actively exploited AND high exploitation probability.
+    if v and v.kev and v.epss_score is not None and v.epss_score >= 0.4:
+        synergy = 8
+        score += synergy
+        factors.append(Factor(
+            "KEV+EPSS synergy", True, synergy,
+            "Both actively exploited and high predicted exploitation probability",
+        ))
+    elif v and v.kev and v.epss_score is not None:
+        factors.append(Factor("KEV+EPSS synergy", True, 0, "KEV listed but EPSS below synergy threshold"))
 
     # Internet exposure - null unless something reliable populated it.
     exposed = finding.asset.internet_facing if finding.asset else None
@@ -211,6 +229,11 @@ def compute_risk(finding: Finding, adj: Adjudication | None,
     else:
         priority = ("P1" if score >= 80 else "P2" if score >= 60
                     else "P3" if score >= 35 else "P4")
+        # Auto-escalate: KEV + high EPSS forces at least P1 regardless of score.
+        if v and v.kev and v.epss_score is not None and v.epss_score >= 0.7:
+            priority = "P1"
+        elif v and v.kev and v.epss_score is not None and v.epss_score >= 0.4 and priority not in ("P1",):
+            priority = "P2"
 
     sla_due, overdue = _sla(finding, eff_sev, adj, now)
 
@@ -233,9 +256,11 @@ def compute_risk(finding: Finding, adj: Adjudication | None,
     )
 
 
-def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
-         now: dt.datetime) -> tuple[dt.datetime | None, bool]:
-    """Remediation due date. Explicit due dates on a routing decision win."""
+def sla_status(first_detected: dt.datetime | None, eff_sev: str, kev: bool,
+               adj: Adjudication | None, now: dt.datetime) -> tuple[dt.datetime | None, bool]:
+    """Remediation due date and whether it has passed. The single SLA rule:
+    accepted/false-positive have none; an explicit due date on a decision wins;
+    otherwise severity SLA from first detection, capped by the KEV SLA."""
     if adj is not None and adj.disposition in (
         Disposition.ACCEPT_RISK.value, Disposition.FALSE_POSITIVE.value
     ):
@@ -243,12 +268,23 @@ def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
     if adj is not None and adj.remediation_due:
         due = _aware(adj.remediation_due)
         return due, due < now
-    first = _aware(finding.first_detected) or now
+    first = _aware(first_detected) or now
     days = settings.policy.remediation_sla_days.get(eff_sev, 90)
-    if finding.vuln and finding.vuln.kev:
+    if kev:
         days = min(days, settings.policy.kev_sla_days)
     due = first + dt.timedelta(days=days)
     return due, due < now
+
+
+def _sla(finding: Finding, eff_sev: str, adj: Adjudication | None,
+         now: dt.datetime) -> tuple[dt.datetime | None, bool]:
+    due, overdue = sla_status(finding.first_detected, eff_sev,
+                              bool(finding.vuln and finding.vuln.kev), adj, now)
+    # A closed finding is no longer accruing lateness; whether it closed within
+    # SLA is reported by the lifecycle timeline and metrics instead.
+    if finding.status in CLOSED_STATUSES:
+        overdue = False
+    return due, overdue
 
 
 def _aware(value: dt.datetime | None) -> dt.datetime | None:

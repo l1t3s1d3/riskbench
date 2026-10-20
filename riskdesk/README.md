@@ -298,7 +298,7 @@ python -m app.cli sync wiz                pull from one source
 python -m app.cli sync all                pull from every configured source
 python -m app.cli sync falcon --limit 500 stop after N findings (useful for a first look)
 python -m app.cli demo                    load synthetic data for all three
-python -m app.cli expire                  lapse decisions past their expiry  ← schedule this
+python -m app.cli expire                  lapse decisions past their expiry (the server also does this hourly)
 python -m app.cli reset --demo-only       clear synthetic rows only
 python -m app.cli reset                   clear everything (asks for confirmation)
 python -m app.cli wiz-introspect --type VulnerabilityFinding
@@ -310,6 +310,65 @@ reporting are **not** deleted — they are marked `stale` after a grace window
 (`RISKDESK_STALE_DAYS`, default 14) and keep their decision history. "This finding
 disappeared" and "someone accepted this risk" are different facts and an auditor will
 eventually ask about both.
+
+### Finding lifecycle
+
+```
+open ──source reports resolved──▶ fixed ──┐
+  │                                       ├──person confirms──▶ verified_fixed
+  └──unreported for the grace window──▶ stale ┘
+any closed state ──source reports it again──▶ open (counted as a reopen)
+```
+
+- `fixed` and `stale` both close the finding (`closed_at` is set) and stop the SLA
+  clock; both can be verified from the finding drawer.
+- The grace window is measured from the last sync that received the finding
+  (`last_synced_at`), not the source's own "updated" timestamp, which can be months old
+  on a live alert.
+- Stale marking is skipped for `--limit` syncs, demo syncs, and any alert family the
+  connector could not read that run (e.g. a missing GitHub code-scanning permission), so
+  a partial pull never closes a backlog.
+- Every transition is recorded. `GET /api/findings/{id}/timeline` merges it with the
+  decisions, exceptions and tickets that touched the finding;
+  `GET /api/lifecycle/metrics?days=90` reports opened vs closed, time to close,
+  closed-within-SLA, reopens, the verification backlog, and tickets whose state disagrees
+  with their findings. Both appear in the UI (finding drawer, Activity tab).
+- New columns are added to an existing database automatically at startup.
+
+### Historical remediation
+
+The connectors each run a second **resolved-pass** that pulls recently-closed
+items so remediation history is captured with the source's own fix date:
+
+| Source | What's pulled | Window | Disable |
+|---|---|---|---|
+| Wiz | `vulnerabilityFindings` with `status: RESOLVED` and `resolvedAt` in window | `WIZ_RESOLVED_WINDOW_DAYS` (default 180) | set to 0 |
+| GitHub | `state=fixed` and `state=dismissed` across all three alert families | `GITHUB_RESOLVED_WINDOW_DAYS` (default 180) | set to 0 |
+| Falcon Spotlight | `status:'closed'+closed_timestamp:>'now-Nd'` | `FALCON_RESOLVED_WINDOW_DAYS` (default 180) | set to 0 |
+| Falcon EDR (Alerts v2) | `/alerts/queries/alerts/v2` + hydrate; open and closed in window | `FALCON_DETECTIONS_WINDOW_DAYS` (default 90) | `FALCON_DETECTIONS=0` |
+
+GitHub `dismissed` alerts are recorded as `suppressed_at_source`, not `fixed`,
+so they don't inflate remediation metrics. Falcon detections land in the
+`detection` category — same lifecycle treatment as a vulnerability, so the
+same reports apply.
+
+**Backload prior history** with `POST /api/findings/import-historical` or the
+"Historical remediation import" panel on the Sources tab. The CSV columns are
+`canonical_id, source, asset, severity, first_detected, closed_at, status`
+(plus `cve_id, title, category, component, component_version,
+source_finding_id, asset_type` optional). Re-importing is idempotent.
+
+**Report on it**:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /api/lifecycle/trends?days=365&granularity=week` | Opened / closed / backlog time series. `granularity` is `day`, `week`, `month`, or `quarter`. |
+| `GET /api/findings/remediated?start=&end=&severity=&source=&category=` | Paginated remediation history with per-row time-to-close and SLA attainment, plus by-severity / by-source / by-month aggregates. |
+| `GET /api/export/remediated.csv?...` | Same scope, CSV for audits. |
+| `GET /api/lifecycle/metrics?days=90` | Rolling snapshot: MTTR, closed-within-SLA %, reopens, verification backlog, ticket drift. |
+
+The Activity tab in the UI renders the trend chart (weekly / monthly bars with
+a backlog line) and the remediated-findings table with the same filters.
 
 ---
 

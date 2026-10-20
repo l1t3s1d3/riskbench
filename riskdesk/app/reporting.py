@@ -20,6 +20,7 @@ from .models import (
 )
 from .queries import build_resolution_map
 from .enums import Disposition
+from .risk import sla_status
 
 
 def generate_executive_summary(db) -> dict:
@@ -50,15 +51,8 @@ def generate_executive_summary(db) -> dict:
         by_disposition[disp] = by_disposition.get(disp, 0) + 1
         if kev:
             kev_open += 1
-        if disp not in ("accept_risk", "false_positive"):
-            fd = first_detected or now
-            if fd.tzinfo is None:
-                fd = fd.replace(tzinfo=dt.timezone.utc)
-            days = settings.policy.remediation_sla_days.get(eff, 90)
-            if kev:
-                days = min(days, settings.policy.kev_sla_days)
-            if fd + dt.timedelta(days=days) < now:
-                overdue += 1
+        if sla_status(first_detected, eff, bool(kev), adj, now)[1]:
+            overdue += 1
 
     # --- Decisions ---
     pending = db.execute(
@@ -70,8 +64,11 @@ def generate_executive_summary(db) -> dict:
         select(func.count()).select_from(Adjudication)
         .where(Adjudication.state == "approved",
                Adjudication.expires_at.isnot(None),
+               Adjudication.expires_at > now,
                Adjudication.expires_at <= horizon)
     ).scalar() or 0
+    from .lifecycle import lifecycle_metrics
+    lc = lifecycle_metrics(db, days=90, now=now)
 
     # --- Compliance ---
     compliance = []
@@ -123,6 +120,14 @@ def generate_executive_summary(db) -> dict:
         "decisions": {
             "pending_approval": pending,
             "expiring_30d": expiring,
+        },
+        "remediation_90d": {
+            "opened": lc["opened_in_window"],
+            "closed": lc["closed_in_window"],
+            "mttr_days": lc["mttr_days"],
+            "closed_within_sla_pct": lc["closed_within_sla_pct"],
+            "reopened": lc["reopened_in_window"],
+            "awaiting_verification": lc["awaiting_verification"],
         },
         "compliance": compliance,
     }

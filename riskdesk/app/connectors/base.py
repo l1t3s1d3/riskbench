@@ -62,6 +62,10 @@ class NormalizedRecord:
     fix_version: str | None = None
     first_detected: dt.datetime | None = None
     last_seen: dt.datetime | None = None
+    # When the source actually resolved it. Required when status != "open" so
+    # historical remediation reporting is anchored to the real fix date,
+    # not when the sync happened to notice.
+    resolved_at: dt.datetime | None = None
     source_url: str | None = None
     raw: dict = field(default_factory=dict)
 

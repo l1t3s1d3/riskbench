@@ -21,6 +21,7 @@ Classic PATs need `security_events` plus `repo`.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import time
 from typing import Iterator
@@ -39,6 +40,9 @@ class GitHubConnector(Connector):
 
     def __init__(self, cfg=None):
         self.cfg = cfg or settings.github
+        # Categories not read in full by the last fetch(); the sync engine must
+        # not treat their absence as remediation.
+        self.skipped_categories: set[str] = set()
 
     def configured(self) -> bool:
         return self.cfg.configured
@@ -80,30 +84,59 @@ class GitHubConnector(Connector):
 
     def fetch(self, limit: int | None = None) -> Iterator[NormalizedRecord]:
         seen = 0
-        streams = []
-        if self.cfg.include_dependabot:
-            streams.append(("dependabot/alerts", self._map_dependabot))
-        if self.cfg.include_code_scanning:
-            streams.append(("code-scanning/alerts", self._map_code_scanning))
-        if self.cfg.include_secret_scanning:
-            streams.append(("secret-scanning/alerts", self._map_secret_scanning))
+        self.skipped_categories = set()
+        families = [
+            (self.cfg.include_dependabot, "dependabot/alerts", self._map_dependabot,
+             FindingCategory.DEPENDENCY.value),
+            (self.cfg.include_code_scanning, "code-scanning/alerts", self._map_code_scanning,
+             FindingCategory.CODE_SCANNING.value),
+            (self.cfg.include_secret_scanning, "secret-scanning/alerts", self._map_secret_scanning,
+             FindingCategory.SECRET.value),
+        ]
+        for enabled, _path, _mapper, category in families:
+            if not enabled:
+                self.skipped_categories.add(category)
 
-        for path, mapper in streams:
+        window = self.cfg.resolved_window_days
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=window)) if window else None
+
+        for enabled, path, mapper, category in families:
+            if not enabled:
+                continue
             try:
-                for item in self._paginate(f"/orgs/{self.cfg.org}/{path}"):
+                for item in self._paginate(f"/orgs/{self.cfg.org}/{path}", state="open"):
                     rec = mapper(item)
                     if rec is not None:
                         yield rec
                         seen += 1
                         if limit and seen >= limit:
                             return
+                # Second pass: recently-closed alerts, so remediated history is
+                # captured with the source's own resolution timestamp.
+                if cutoff is None:
+                    continue
+                for state in ("fixed", "dismissed"):
+                    for item in self._paginate(f"/orgs/{self.cfg.org}/{path}", state=state):
+                        updated = parse_ts(item.get("updated_at"))
+                        if updated is not None and updated < cutoff:
+                            # Alerts are returned newest-first, so once we fall
+                            # off the window we can stop paging this stream.
+                            break
+                        rec = mapper(item)
+                        if rec is not None:
+                            yield rec
+                            seen += 1
+                            if limit and seen >= limit:
+                                return
             except PermissionError as exc:
                 # One disabled feature should not fail the whole sync.
                 log.warning("Skipping %s: %s", path, exc)
+                self.skipped_categories.add(category)
 
-    def _paginate(self, path: str) -> Iterator[dict]:
+    def _paginate(self, path: str, state: str = "open") -> Iterator[dict]:
         url = f"{self.cfg.api_url}{path}"
-        params = {"per_page": self.cfg.page_size, "state": "open"}
+        params = {"per_page": self.cfg.page_size, "state": state,
+                  "sort": "updated", "direction": "desc"}
         while url:
             r = self._get_with_retry(url, params)
             if r.status_code in (403, 404):
@@ -180,7 +213,7 @@ class GitHubConnector(Connector):
             ),
             severity=severity.value,
             source_severity=adv.get("severity"),
-            status="open" if item.get("state") == "open" else "fixed",
+            status=_gh_status(item),
             component=pkg.get("name"),
             component_version=vuln_meta.get("vulnerable_version_range"),
             component_key=purl(pkg.get("ecosystem"), pkg.get("name")),
@@ -189,6 +222,8 @@ class GitHubConnector(Connector):
             fix_version=first_patched,
             first_detected=parse_ts(item.get("created_at")),
             last_seen=parse_ts(item.get("updated_at")),
+            resolved_at=parse_ts(item.get("fixed_at") or item.get("dismissed_at")
+                                 or item.get("auto_dismissed_at")),
             source_url=item.get("html_url"),
             raw=item,
         )
@@ -223,7 +258,7 @@ class GitHubConnector(Connector):
             ),
             severity=severity.value,
             source_severity=rule.get("security_severity_level") or rule.get("severity"),
-            status="open" if item.get("state") == "open" else "fixed",
+            status=_gh_status(item),
             component=tool,
             component_key=f"rule:{canonical}",
             location=location,
@@ -231,6 +266,7 @@ class GitHubConnector(Connector):
             fix_available=bool(item.get("autofix_available")),
             first_detected=parse_ts(item.get("created_at")),
             last_seen=parse_ts(item.get("updated_at") or inst.get("commit_sha")),
+            resolved_at=parse_ts(item.get("fixed_at") or item.get("dismissed_at")),
             source_url=item.get("html_url"),
             raw=item,
         )
@@ -257,16 +293,29 @@ class GitHubConnector(Connector):
             ),
             severity=severity,
             source_severity=item.get("validity"),
-            status="open" if item.get("state") == "open" else "fixed",
+            status=_gh_status(item),
             component=display,
             component_key=f"secret:{secret_type}",
             location=None,
             fix_available=False,
             first_detected=parse_ts(item.get("created_at")),
             last_seen=parse_ts(item.get("updated_at")),
+            resolved_at=parse_ts(item.get("resolved_at")),
             source_url=item.get("html_url"),
             raw=item,
         )
+
+
+def _gh_status(item: dict) -> str:
+    """Map GitHub alert state to our FindingStatus. Dismissed/suppressed alerts
+    stay distinguishable from genuine fixes."""
+    state = (item.get("state") or "").lower()
+    if state == "open":
+        return "open"
+    if state == "dismissed" or state == "auto_dismissed":
+        return "suppressed_at_source"
+    # fixed, resolved, revoked, etc. all count as remediated at source.
+    return "fixed"
 
 
 def _next_link(link_header: str) -> str | None:
