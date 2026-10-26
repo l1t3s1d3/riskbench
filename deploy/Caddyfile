@@ -1,0 +1,42 @@
+# Edit the hostname below. Caddy will auto-provision a Let's Encrypt cert on
+# first start as long as the hostname resolves to this VM and port 80 is open.
+#
+# For a VM that's not internet-facing, replace the whole block with:
+#   :443 {
+#     tls internal                 # local-trust self-signed cert
+#     reverse_proxy 127.0.0.1:8080
+#   }
+# and trust Caddy's root CA on each client that will visit the site:
+#   caddy trust
+
+riskdesk.example.com {
+    encode zstd gzip
+
+    # Hardening headers. Adjust CSP if you add external CDN assets.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "same-origin"
+        Permissions-Policy        "camera=(), microphone=(), geolocation=()"
+        -Server
+    }
+
+    # Static assets can cache aggressively; the SPA shell cannot.
+    @static path /static/*
+    header @static Cache-Control "public, max-age=86400"
+
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        transport http { keepalive 30s }
+    }
+
+    log {
+        output file /var/log/caddy/riskdesk.log {
+            roll_size 50MiB
+            roll_keep 10
+        }
+        format json
+    }
+}

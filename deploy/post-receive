@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Git post-receive hook. Fires once per ref update on git push.
+# Only deploys when the pushed ref is refs/heads/main.
+set -euo pipefail
+
+APP_DIR=/opt/riskdesk
+
+while read -r oldrev newrev refname; do
+    if [[ "$refname" != "refs/heads/main" ]]; then
+        echo "skipping $refname (deploy only runs on main)"
+        continue
+    fi
+    # Hand off to the deploy script. It runs as the deploy user (which is the
+    # same user owning this hook) and uses sudo for the systemctl restart.
+    exec "$APP_DIR/deploy.sh" "$oldrev" "$newrev"
+done
