@@ -24,10 +24,43 @@ msg "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
-    python3.11 python3.11-venv python3-pip \
-    git curl ca-certificates \
+    git curl ca-certificates software-properties-common gnupg lsb-release \
     ufw unattended-upgrades fail2ban \
     sqlite3 cron rsync debian-keyring debian-archive-keyring apt-transport-https
+
+# ---- Pick a Python >= 3.11 ------------------------------------------------
+# Debian 12 and Ubuntu 24.04+ have 3.11 or newer in the default repos; on
+# older Ubuntu we add the deadsnakes PPA. If none of that works we fall back
+# to the system python3 if it is already 3.11 or newer.
+msg "Installing Python 3.11+"
+PY_BIN=""
+if apt-get install -y -qq python3.11 python3.11-venv python3.11-distutils 2>/dev/null; then
+    PY_BIN=python3.11
+elif [[ -f /etc/lsb-release ]] && grep -q Ubuntu /etc/lsb-release; then
+    msg "Enabling deadsnakes PPA for Python 3.11"
+    add-apt-repository -y ppa:deadsnakes/ppa >/dev/null
+    apt-get update -qq
+    apt-get install -y -qq python3.11 python3.11-venv python3.11-distutils
+    PY_BIN=python3.11
+elif command -v python3 >/dev/null; then
+    PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    PY_MAJOR=${PY_VER%.*}; PY_MINOR=${PY_VER#*.}
+    if (( PY_MAJOR == 3 && PY_MINOR >= 11 )); then
+        msg "Using system python3 ($PY_VER) — new enough"
+        apt-get install -y -qq python3-venv python3-pip
+        PY_BIN=python3
+    fi
+fi
+if [[ -z "$PY_BIN" ]]; then
+    echo "No usable Python 3.11+ found. Install one and re-run." >&2
+    echo "On Debian/Ubuntu: 'apt install python3.11 python3.11-venv'" >&2
+    exit 1
+fi
+# Record for deploy.sh and anything else that needs to know which binary to use.
+install -d -m 0755 /etc/riskdesk
+echo "$PY_BIN" > /etc/riskdesk/python-binary
+chmod 0644 /etc/riskdesk/python-binary
+msg "Using Python interpreter: $PY_BIN ($(command -v $PY_BIN))"
 
 # Caddy from its own apt repo
 if ! command -v caddy >/dev/null; then
@@ -65,8 +98,8 @@ install -d -o root       -g "$APP_USER" -m 0750 "$ETC_DIR"
 
 # App venv is created once; deploy.sh keeps it fresh.
 if [[ ! -d "$APP_DIR/.venv" ]]; then
-    msg "Creating Python virtualenv"
-    sudo -u "$APP_USER" python3.11 -m venv "$APP_DIR/.venv"
+    msg "Creating Python virtualenv with $PY_BIN"
+    sudo -u "$APP_USER" "$PY_BIN" -m venv "$APP_DIR/.venv"
     sudo -u "$APP_USER" "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 fi
 
