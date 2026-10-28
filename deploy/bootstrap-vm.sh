@@ -141,13 +141,24 @@ if [[ ! -f /home/$DEPLOY_USER/.ssh/authorized_keys ]]; then
     msg "Append your dev-machine public key to /home/$DEPLOY_USER/.ssh/authorized_keys"
 fi
 
-# sudoers: deploy user may restart the app only
-cat > /etc/sudoers.d/riskdesk-deploy <<EOF
-Defaults!/bin/systemctl !requiretty
+# sudoers: deploy user may restart the app only. Write to a staging file,
+# validate with visudo -c, then move it into place -- a bad sudoers file
+# locks everyone out, including root in some cases.
+STAGE=$(mktemp)
+cat > "$STAGE" <<EOF
 $DEPLOY_USER ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk
-$APP_USER   ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk
+$APP_USER    ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk
 EOF
-chmod 0440 /etc/sudoers.d/riskdesk-deploy
+chmod 0440 "$STAGE"
+if ! visudo -cf "$STAGE" >/dev/null; then
+    echo "sudoers fragment failed syntax check:" >&2
+    cat "$STAGE" >&2
+    rm -f "$STAGE"
+    exit 1
+fi
+mv "$STAGE" /etc/sudoers.d/riskdesk-deploy
+# Remove any broken fragment from a previous run.
+rm -f /etc/sudoers.d/riskdesk-deploy.bak
 
 # Firewall
 msg "Configuring firewall (ufw)"
