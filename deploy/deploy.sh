@@ -54,7 +54,8 @@ echo "$NEWREV" > "$STAGING/.deployed-rev"
 
 step "Installing Python dependencies"
 VENV=$STAGING/.venv
-python3.11 -m venv "$VENV"
+PY_BIN=$(cat /etc/riskdesk/python-binary 2>/dev/null || echo python3.11)
+"$PY_BIN" -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip wheel
 "$VENV/bin/pip" install --quiet -r "$STAGING/riskdesk/requirements.txt"
 # Scanners run inside the staging venv so they see the exact deps that will

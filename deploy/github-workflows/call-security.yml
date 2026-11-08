@@ -1,0 +1,25 @@
+# Caller workflow. Drop this at .github/workflows/security.yml in every repo
+# that should run the shared security pipeline. Change <your-org> to your
+# GitHub organisation name.
+
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    - cron: '13 4 * * 1'   # Monday 04:13 UTC -- weekly re-scan to catch new CVEs on unchanged code
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  security:
+    uses: <your-org>/.github/.github/workflows/security.yml@main
+    with:
+      severity-threshold: high
+      # skip-codeql: true     # uncomment if this repo runs CodeQL in its own workflow
