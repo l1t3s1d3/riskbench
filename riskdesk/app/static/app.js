@@ -6,7 +6,15 @@ const state = {
   view: 'findings',
   page: 1,
   pageSize: 50,
-  filter: { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: 'risk' },
+  filter: {
+    status: ['open'], source: [], severity: [], category: [], disposition: [],
+    quick: null, q: '', sort: 'risk',
+    // Exact-match drill-downs (set by clicking a group row).
+    asset_id: null, component: '', component_version: '',
+    owner: '', business_unit: '', asset_type: '', asset_group_id: null, ecosystem: '',
+  },
+  groupBy: '',    // '' = list view; 'cve' | 'asset' | 'component' | ...
+  groupResults: null,
   results: null,
   selected: new Set(),
   allMatchingIds: null,     // set when "select all matching" is used
@@ -119,6 +127,13 @@ async function boot() {
   }, 300);
 
   $('sortSelect').onchange = () => { state.filter.sort = $('sortSelect').value; state.page = 1; loadFindings(); };
+  $('groupBy').onchange = () => {
+    state.groupBy = $('groupBy').value;
+    state.page = 1;
+    state.selected.clear();
+    state.allMatchingIds = null;
+    loadFindings();
+  };
   $('quickViews').onclick = (e) => {
     const b = e.target.closest('button');
     if (!b) return;
@@ -194,6 +209,15 @@ function filterParams() {
   state.filter.disposition.forEach((v) => p.append('disposition', v));
   if (state.filter.q) p.set('q', state.filter.q);
   if (state.filter.sort) p.set('sort', state.filter.sort);
+  // Exact-match drill-down filters from a clicked group row.
+  if (state.filter.asset_id != null) p.set('asset_id', state.filter.asset_id);
+  if (state.filter.component) p.set('component', state.filter.component);
+  if (state.filter.component_version) p.set('component_version', state.filter.component_version);
+  if (state.filter.owner) p.set('owner', state.filter.owner);
+  if (state.filter.business_unit) p.set('business_unit', state.filter.business_unit);
+  if (state.filter.asset_type) p.set('asset_type', state.filter.asset_type);
+  if (state.filter.asset_group_id != null) p.set('asset_group_id', state.filter.asset_group_id);
+  if (state.filter.ecosystem) p.set('ecosystem', state.filter.ecosystem);
   const q = state.filter.quick;
   if (q === 'kev') p.set('kev', 'true');
   if (q === 'overdue') p.set('overdue', 'true');
@@ -204,20 +228,31 @@ function filterParams() {
 }
 
 async function loadFindings() {
-  $('findingsList').innerHTML = '<div class="spin">Loading findings\u2026</div>';
-  const p = filterParams();
-  p.set('page', state.page);
-  p.set('page_size', state.pageSize);
-  const [results, fac, dash] = await Promise.all([
-    api(`/api/findings?${p}`),
+  $('findingsList').innerHTML = '<div class="spin">Loading\u2026</div>';
+  $('exportFindings').href = `/api/export/findings.csv?${filterParams()}`;
+  const [fac, dash] = await Promise.all([
     api(`/api/facets?${filterParams()}`),
     api('/api/dashboard'),
   ]);
-  state.results = results;
-  renderFindings();
   renderFacets(fac);
   renderStats(dash);
-  $('exportFindings').href = `/api/export/findings.csv?${filterParams()}`;
+  renderActiveDrillDowns();
+  if (state.groupBy) {
+    const p = filterParams();
+    p.set('by', state.groupBy);
+    p.set('page', state.page);
+    p.set('page_size', state.pageSize);
+    state.groupResults = await api(`/api/findings/grouped?${p}`);
+    state.results = null;
+    renderGroupedFindings();
+  } else {
+    const p = filterParams();
+    p.set('page', state.page);
+    p.set('page_size', state.pageSize);
+    state.results = await api(`/api/findings?${p}`);
+    state.groupResults = null;
+    renderFindings();
+  }
 }
 
 function renderStats(d) {
@@ -427,10 +462,179 @@ function rowHtml(f) {
 }
 
 function renderPager() {
-  const r = state.results;
+  const r = state.results || state.groupResults;
+  if (!r) return;
   $('pageLabel').textContent = `Page ${r.page} of ${r.pages}`;
   $('prevPage').disabled = r.page <= 1;
   $('nextPage').disabled = r.page >= r.pages;
+}
+
+
+// ---------------------------------------------------------------- grouped view
+
+const GROUP_BY_LABEL = {
+  cve: 'CVE', asset: 'Asset', component: 'Component',
+  component_version: 'Component + version', asset_type: 'Asset type',
+  owner: 'Owner', business_unit: 'Business unit', ecosystem: 'Ecosystem',
+};
+
+const DRILLDOWN_KEYS = [
+  'asset_id', 'component', 'component_version', 'owner',
+  'business_unit', 'asset_type', 'asset_group_id', 'ecosystem',
+];
+
+function renderGroupedFindings() {
+  const r = state.groupResults;
+  if (!r) return;
+  $('resultCount').innerHTML = `<b>${r.total_groups.toLocaleString()}</b> groups ` +
+    `· <span class="hint">${r.total_findings.toLocaleString()} findings grouped by ${esc(GROUP_BY_LABEL[r.group_by] || r.group_by)}</span>`;
+  $('selectPage').checked = false;
+  $('selectAllBar').hidden = true;
+
+  if (!r.groups.length) {
+    $('findingsList').innerHTML = `<div class="empty"><b>Nothing to group.</b>
+      Widen the filters, or switch grouping off.</div>`;
+    renderPager();
+    return;
+  }
+  $('findingsList').innerHTML = r.groups.map((g) => groupRowHtml(g, r.group_by)).join('');
+  $('findingsList').onclick = (e) => {
+    const b = e.target.closest('[data-action]');
+    if (!b) return;
+    const row = b.closest('.row');
+    const key = row.dataset.groupKey;
+    const g = r.groups.find((x) => x.key === key);
+    if (!g) return;
+    if (b.dataset.action === 'drill') drillIntoGroup(g, r.group_by);
+    if (b.dataset.action === 'decide') actOnGroup(g, r.group_by, 'decide');
+    if (b.dataset.action === 'ticket') actOnGroup(g, r.group_by, 'ticket');
+  };
+  renderPager();
+}
+
+function groupRowHtml(g, by) {
+  const sev = g.max_severity;
+  const sevChips = Object.entries(g.severity_counts)
+    .sort((a, b) => SEV_ORDER.indexOf(a[0]) - SEV_ORDER.indexOf(b[0]))
+    .map(([k, v]) => `<span class="tag" style="font-size:9px">${esc(k)}: ${v}</span>`)
+    .join(' ');
+  const statusChips = Object.entries(g.status_counts)
+    .filter(([k]) => k !== 'open')
+    .map(([k, v]) => `<span class="tag tag-closed" style="font-size:9px">${esc(STATUS_SHORT[k] || k)}: ${v}</span>`)
+    .join(' ');
+  const kev = g.kev_count ? `<span class="tag tag-kev">KEV ${g.kev_count}</span>` : '';
+  const fix = g.fix_available_count ? `<span class="tag">fix in ${g.fix_available_count}/${g.finding_count}</span>` : '';
+  const age = g.oldest_open_detected ? daysFrom(g.oldest_open_detected) : null;
+  const subtitle = by === 'cve'
+    ? esc(g.title || '')
+    : by === 'asset'
+      ? esc(g.asset_type || '')
+      : by === 'component_version'
+        ? esc(g.component + ' @ ' + (g.component_version || '(no version)'))
+        : (g.sample_titles && g.sample_titles.length
+            ? esc(g.sample_titles[0]) + (g.sample_titles.length > 1 ? ', +more' : '')
+            : '');
+
+  return `<div class="row" data-group-key="${esc(g.key)}">
+    <div class="edge sev-${sev}"></div>
+    <div class="row-check"></div>
+    <div class="row-main">
+      <div class="row-id">${esc(g.label)} <span class="hint" style="font-size:11px">${esc(GROUP_BY_LABEL[by])}</span></div>
+      <div class="row-title">${subtitle}</div>
+      <div class="row-meta">
+        <span>${gauge(sev)} <em>${sev}</em></span>
+        <span><b>${g.finding_count.toLocaleString()}</b> findings on <b>${g.asset_count.toLocaleString()}</b> assets</span>
+        ${g.sources.length ? `<span>${g.sources.map(esc).join(', ')}</span>` : ''}
+        ${age !== null ? `<span>oldest ${age}d open</span>` : ''}
+        ${g.fix_versions && g.fix_versions.length ? `<span>fix: ${g.fix_versions.map(esc).join(', ')}</span>` : ''}
+      </div>
+      <div class="row-meta" style="margin-top:4px">${sevChips} ${statusChips} ${kev} ${fix}</div>
+    </div>
+    <div class="row-asset">${g.suggested_scope === 'vuln' ? 'Scope: vuln (all assets)' : g.suggested_scope === 'component' ? 'Scope: component (future too)' : 'Scope: per-finding'}
+      <small>${g.max_score ? 'max score ' + g.max_score : ''}</small>
+    </div>
+    <div class="row-risk">
+      <div class="score">${g.finding_count}</div>
+    </div>
+    <div class="row-state" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+      <button class="btn-ghost" style="font-size:11px;padding:3px 8px" data-action="drill" title="Show findings in this group">Open</button>
+      <button class="btn" style="font-size:11px;padding:3px 8px" data-action="decide" title="Record a decision for the whole group">Decide</button>
+      <button class="btn-ghost" style="font-size:11px;padding:3px 8px" data-action="ticket" title="Create a ticket for the whole group">Ticket</button>
+    </div>
+  </div>`;
+}
+
+function drillIntoGroup(g, by) {
+  // Clear existing drill-downs so they don't compound.
+  DRILLDOWN_KEYS.forEach((k) => { state.filter[k] = (k.endsWith('_id') ? null : ''); });
+  if (by === 'cve') state.filter.cve = g.canonical_id || g.key;
+  else if (by === 'asset') { state.filter.asset_id = parseInt(g.key); state.filter.cve = ''; }
+  else if (by === 'component') state.filter.component = g.key;
+  else if (by === 'component_version') {
+    state.filter.component = g.component || '';
+    state.filter.component_version = g.component_version || '';
+  } else if (by === 'asset_type') state.filter.asset_type = g.key;
+  else if (by === 'owner') state.filter.owner = g.key;
+  else if (by === 'business_unit') state.filter.business_unit = g.key;
+  else if (by === 'ecosystem') state.filter.ecosystem = g.key;
+  state.groupBy = '';
+  $('groupBy').value = '';
+  state.page = 1;
+  state.selected.clear();
+  state.allMatchingIds = null;
+  loadFindings().then(() => { selectAllMatching(); });
+}
+
+async function actOnGroup(g, by, action) {
+  // Pre-fill the selection with every finding in the group, then open the
+  // appropriate dialog. We call /api/findings/ids with the same drill-down
+  // we'd use to open the list, so the scope matches the group exactly.
+  const saved = { ...state.filter };
+  drillIntoGroup(g, by);
+  // drillIntoGroup already queues loadFindings + selectAllMatching; wait a
+  // tick for the ids call, then open the dialog.
+  setTimeout(() => {
+    if (action === 'decide') openDecide([...state.selected]);
+    else if (action === 'ticket') openCreateTicket([...state.selected]);
+  }, 600);
+}
+
+function renderActiveDrillDowns() {
+  let host = document.getElementById('drillDownChips');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'drillDownChips';
+    host.style.cssText = 'padding:4px 18px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;border-bottom:1px solid var(--rule-soft)';
+    $('findingsList').parentElement.insertBefore(host, $('findingsList'));
+  }
+  const labels = {
+    asset_id: 'asset id', component: 'component', component_version: 'version',
+    owner: 'owner', business_unit: 'BU', asset_type: 'asset type',
+    asset_group_id: 'asset group', ecosystem: 'ecosystem',
+  };
+  const chips = [];
+  for (const k of DRILLDOWN_KEYS) {
+    const v = state.filter[k];
+    if (v !== null && v !== '' && v !== undefined) {
+      chips.push(`<span class="tag" style="font-size:11px" data-drill="${k}">
+        ${labels[k]}: ${esc(String(v))} <a href="#" class="link" style="margin-left:4px" data-clear="${k}">×</a>
+      </span>`);
+    }
+  }
+  if (!chips.length) { host.innerHTML = ''; return; }
+  host.innerHTML = '<span class="hint" style="font-size:11px">Drilled down:</span>' +
+    chips.join('') +
+    `<a href="#" class="link" style="font-size:11px" id="clearAllDrills">clear all</a>`;
+  host.onclick = (e) => {
+    const c = e.target.closest('[data-clear]');
+    if (c) { e.preventDefault(); state.filter[c.dataset.clear] = (c.dataset.clear.endsWith('_id') ? null : ''); state.page = 1; loadFindings(); return; }
+    if (e.target.id === 'clearAllDrills') {
+      e.preventDefault();
+      DRILLDOWN_KEYS.forEach((k) => { state.filter[k] = (k.endsWith('_id') ? null : ''); });
+      state.page = 1;
+      loadFindings();
+    }
+  };
 }
 
 async function selectAllMatching() {

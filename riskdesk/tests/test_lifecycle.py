@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, func, select, text, update
 import app.sync as sync_mod
 from app.connectors.base import NormalizedAsset, NormalizedRecord, NormalizedVuln
 from app.models import (
-    Adjudication, AssignmentRule, AuditEvent, Finding, FindingEvent, Ticket,
+    Adjudication, AssignmentRule, AuditEvent, Finding, FindingEvent, Ticket, Vuln,
 )
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -506,6 +506,192 @@ def test_detection_category_appears_in_facets_and_metrics(sync, db, client):
 
 
 # --- lifecycle status handling -------------------------------------------------
+
+# --- grouped search ---------------------------------------------------------
+
+def test_grouped_by_cve_rolls_up_across_assets(sync, db, client):
+    """Same CVE on three hosts groups into one row with asset_count=3."""
+    asset_names = ["web-01", "web-02", "db-01"]
+    recs = []
+    for i, host in enumerate(asset_names):
+        recs.append(NormalizedRecord(
+            source_finding_id=f"wiz:{host}:1", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id=host, name=host, asset_type="server"),
+            vuln=NormalizedVuln(canonical_id="CVE-2021-44228", cve_id="CVE-2021-44228",
+                                title="Log4Shell", severity="critical", kev=True),
+            severity="critical", status="open",
+        ))
+    # One unrelated CVE on one host for contrast
+    recs.append(NormalizedRecord(
+        source_finding_id="wiz:web-01:2", category="os_vuln",
+        asset=NormalizedAsset(source_asset_id="web-01", name="web-01", asset_type="server"),
+        vuln=NormalizedVuln(canonical_id="CVE-2024-0001", severity="high"),
+        severity="high", status="open",
+    ))
+    sync(recs)
+
+    r = client.get("/api/findings/grouped?by=cve").json()
+    assert r["group_by"] == "cve"
+    assert r["total_groups"] == 2
+    by_key = {g["key"]: g for g in r["groups"]}
+    log4j = by_key["CVE-2021-44228"]
+    assert log4j["finding_count"] == 3
+    assert log4j["asset_count"] == 3
+    assert log4j["max_severity"] == "critical"
+    assert log4j["kev_count"] == 3
+    assert log4j["suggested_scope"] == "vuln"
+    assert log4j["suggested_scope_key"] == "CVE-2021-44228"
+    assert len(log4j["sample_finding_ids"]) == 3
+
+
+def test_grouped_by_asset_lists_hosts(sync, db, client):
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:web-01:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id="web-01", name="web-01", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id=f"CVE-2024-{i}", severity="high"),
+            severity="high", status="open",
+        ) for i in range(4)
+    ])
+    r = client.get("/api/findings/grouped?by=asset").json()
+    assert r["total_groups"] == 1
+    g = r["groups"][0]
+    assert g["label"] == "web-01"
+    assert g["finding_count"] == 4
+    assert g["asset_count"] == 1
+    assert g["suggested_scope"] == "finding"
+
+
+def test_grouped_by_component_uses_component_scope(sync, db, client):
+    """Grouping by component lifts the component_key scope so a decision on
+    the group covers every future finding in that package."""
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"gh:pli/repo:dep-{i}", category="dependency",
+            asset=NormalizedAsset(source_asset_id=f"pli/repo-{i}", name=f"pli/repo-{i}",
+                                  asset_type="repository"),
+            vuln=NormalizedVuln(canonical_id=f"GHSA-{i}", severity="high"),
+            severity="high", status="open",
+            component="lodash", component_version="4.17.20",
+            component_key="pkg:npm/lodash",
+        ) for i in range(5)
+    ])
+    r = client.get("/api/findings/grouped?by=component").json()
+    g = r["groups"][0]
+    assert g["label"] == "lodash"
+    assert g["finding_count"] == 5
+    assert g["suggested_scope"] == "component"
+    assert g["suggested_scope_key"] == "pkg:npm/lodash"
+
+
+def test_grouped_by_ecosystem_derived_from_component_key(sync, db, client):
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"gh:r:{i}", category="dependency",
+            asset=NormalizedAsset(source_asset_id="pli/repo", name="pli/repo", asset_type="repository"),
+            vuln=NormalizedVuln(canonical_id=f"GHSA-{i}", severity="high"),
+            severity="high", status="open",
+            component="lodash" if i < 2 else "requests",
+            component_key="pkg:npm/lodash" if i < 2 else "pkg:pypi/requests",
+        ) for i in range(5)
+    ])
+    r = client.get("/api/findings/grouped?by=ecosystem").json()
+    by_key = {g["key"]: g for g in r["groups"]}
+    assert by_key["npm"]["finding_count"] == 2
+    assert by_key["pypi"]["finding_count"] == 3
+
+
+def test_grouped_respects_resolution_map(sync, db, client):
+    """An ADJUST_RISK decision that downgrades severity shows up in the
+    group's effective-severity rollup, not just the raw column."""
+    from app.adjudication import create_decisions, decide
+    from app.models import Finding
+    from sqlalchemy import select
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:host:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id=f"host-{i}", name=f"host-{i}", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id="CVE-2024-X", severity="critical"),
+            severity="critical", status="open",
+        ) for i in range(3)
+    ])
+    fids = [f.id for f in db.execute(
+        select(Finding).join(Vuln, Finding.vuln_id == Vuln.id)
+        .where(Vuln.canonical_id == "CVE-2024-X")
+    ).scalars()]
+    assert len(fids) == 3
+    for adj in create_decisions(db, fids, "adjust_risk",
+                                "Internal network only; compensating WAF blocks exploit.",
+                                actor="admin1", approver="executive1", scope="vuln",
+                                adjusted_severity="medium"):
+        decide(db, adj.id, True, "executive1")
+
+    r = client.get("/api/findings/grouped?by=cve").json()
+    g = next(x for x in r["groups"] if x["key"] == "CVE-2024-X")
+    assert g["severity_counts"].get("medium") == 3
+    assert g["max_severity"] == "medium"
+
+
+def test_grouped_drill_down_filter_matches_group(sync, db, client):
+    """Every drill-down filter the UI sets from a clicked group row
+    produces the same count as the group header."""
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:a:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id="host-a", name="host-a", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id=f"CVE-2024-A{i}", severity="high"),
+            severity="high", status="open",
+            component="openssl", component_version="1.1.1",
+            component_key="pkg:generic/openssl",
+        ) for i in range(4)
+    ])
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:b:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id="host-b", name="host-b", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id=f"CVE-2024-B{i}", severity="high"),
+            severity="high", status="open",
+            component="nginx", component_version="1.20",
+            component_key="pkg:generic/nginx",
+        ) for i in range(2)
+    ])
+    # Drill into the "openssl" group
+    r = client.get("/api/findings?component=openssl").json()
+    assert r["total"] == 4
+    # Drill into the "host-b" group
+    r = client.get("/api/findings/ids?asset_id=" + str(
+        db.execute(select(Finding).where(Finding.source_finding_id == "wiz:b:0")).scalar_one().asset_id
+    )).json()
+    assert r["total"] == 2
+
+
+def test_grouped_sorts(sync, db, client):
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:small:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id="small", name="small", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id="CVE-small", severity="low"),
+            severity="low", status="open",
+        ) for i in range(2)
+    ])
+    sync([
+        NormalizedRecord(
+            source_finding_id=f"wiz:big:{i}", category="os_vuln",
+            asset=NormalizedAsset(source_asset_id="big", name="big", asset_type="server"),
+            vuln=NormalizedVuln(canonical_id="CVE-big", severity="low"),
+            severity="low", status="open",
+        ) for i in range(10)
+    ])
+    r = client.get("/api/findings/grouped?by=cve&group_sort=count").json()
+    assert r["groups"][0]["key"] == "CVE-big"
+    r = client.get("/api/findings/grouped?by=cve&group_sort=count&order=asc").json()
+    assert r["groups"][0]["key"] == "CVE-small"
+
+
+def test_grouped_rejects_bad_dimension(client):
+    r = client.get("/api/findings/grouped?by=nonsense")
+    assert r.status_code == 422
+
 
 def test_suppressed_at_source_from_connector(sync, db):
     sync([rec("a")])

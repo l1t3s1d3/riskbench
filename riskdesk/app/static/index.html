@@ -81,6 +81,18 @@
         <span class="count" id="resultCount">&nbsp;</span>
       </div>
       <div class="toolbar-right">
+        <label class="micro" for="groupBy">Group by</label>
+        <select id="groupBy" class="field-sm">
+          <option value="">None (list)</option>
+          <option value="cve">CVE / vuln id</option>
+          <option value="asset">Asset</option>
+          <option value="component">Component (technology)</option>
+          <option value="component_version">Component + version</option>
+          <option value="asset_type">Asset type</option>
+          <option value="owner">Owner</option>
+          <option value="business_unit">Business unit</option>
+          <option value="ecosystem">Ecosystem (pkg manager)</option>
+        </select>
         <label class="micro" for="sortSelect">Sort</label>
         <select id="sortSelect" class="field-sm">
           <option value="risk">Risk score</option>
