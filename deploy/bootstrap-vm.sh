@@ -146,7 +146,7 @@ fi
 # locks everyone out, including root in some cases.
 STAGE=$(mktemp)
 cat > "$STAGE" <<EOF
-$DEPLOY_USER ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk
+$DEPLOY_USER ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk, /bin/systemctl enable riskdesk, /bin/systemctl start riskdesk
 $APP_USER    ALL=(root) NOPASSWD: /bin/systemctl restart riskdesk, /bin/systemctl status riskdesk
 EOF
 chmod 0440 "$STAGE"
@@ -190,9 +190,13 @@ Next steps:
   1. Fill in secrets:        sudoedit $ETC_DIR/env
   2. Add your SSH key:       nano /home/$DEPLOY_USER/.ssh/authorized_keys
   3. Edit Caddyfile:         sudoedit /etc/caddy/Caddyfile  (set your hostname)
-  4. Start services:         sudo systemctl enable --now riskdesk caddy
+  4. Start Caddy:            sudo systemctl enable --now caddy
   5. From your dev machine:  git remote add vm $DEPLOY_USER@<vm-host>:$GIT_DIR
                              git push vm HEAD:main
+     The push populates /opt/riskdesk/current and deploy.sh starts the
+     service. DO NOT run 'systemctl start riskdesk' before the first push:
+     the venv does not exist yet, so the service will crash-loop.
+     After the first successful push: sudo systemctl enable riskdesk
 
 Logs:
   journalctl -u riskdesk -f

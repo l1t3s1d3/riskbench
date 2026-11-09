@@ -50,8 +50,12 @@ Copy `deploy/bootstrap-vm.sh` to the VM and run it. It:
 # on the VM
 sudo bash bootstrap-vm.sh
 sudoedit /etc/riskdesk/env          # fill in secrets
-sudo systemctl enable --now riskdesk
+sudoedit /etc/caddy/Caddyfile       # set hostname or use 'tls internal'
 sudo systemctl enable --now caddy
+# Do NOT start riskdesk yet -- it needs code deployed first. The first
+# `git push vm HEAD:main` populates /opt/riskdesk/current and starts
+# the service. After that:
+# sudo systemctl enable riskdesk    # so it comes up on reboot
 ```
 
 Add your dev machine's SSH public key to `/home/deploy/.ssh/authorized_keys`

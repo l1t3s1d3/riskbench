@@ -100,6 +100,9 @@ chown -R riskdesk:riskdesk "$CURRENT"
 
 step "Restarting service"
 sudo /bin/systemctl restart riskdesk
+# First-time deploys: make sure the service is enabled for next boot. No-op
+# if it is already enabled, so safe to run every time.
+sudo /bin/systemctl enable riskdesk 2>/dev/null || true
 
 # Service runs the additive migration at startup; wait for it to come up.
 for i in 1 2 3 4 5 6 7 8 9 10; do
