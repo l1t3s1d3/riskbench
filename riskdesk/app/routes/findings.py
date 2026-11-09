@@ -49,6 +49,14 @@ def _filter_from_query(
     q: str = "",
     asset: str = "",
     cve: str = "",
+    asset_id: int | None = None,
+    component: str = "",
+    component_version: str = "",
+    owner: str = "",
+    business_unit: str = "",
+    asset_type: str = "",
+    asset_group_id: int | None = None,
+    ecosystem: str = "",
     sort: str = "risk",
     order: str = "desc",
 ) -> FindingFilter:
@@ -56,7 +64,11 @@ def _filter_from_query(
         sources=source, severities=severity, statuses=status, categories=category,
         dispositions=disposition, priorities=priority, kev_only=kev,
         fixable_only=fixable, overdue_only=overdue, undecided_only=undecided,
-        q=q, asset=asset, cve=cve, sort=sort, order=order,
+        q=q, asset=asset, cve=cve,
+        asset_id=asset_id, component=component, component_version=component_version,
+        owner=owner, business_unit=business_unit, asset_type=asset_type,
+        asset_group_id=asset_group_id, ecosystem=ecosystem,
+        sort=sort, order=order,
     )
 
 
@@ -118,6 +130,25 @@ def matching_ids(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_
 @router.get("/facets")
 def facets_endpoint(f: FindingFilter = Depends(_filter_from_query), db=Depends(get_session)):
     return get_facets(db, f)
+
+
+@router.get("/findings/grouped")
+def list_grouped(
+    by: str = Query(..., pattern="^(cve|asset|component|component_version|asset_type|owner|business_unit|ecosystem)$"),
+    group_sort: str = Query("count", pattern="^(count|severity|score|assets|label)$"),
+    page: int = 1,
+    page_size: int = Query(50, ge=1, le=500),
+    f: FindingFilter = Depends(_filter_from_query),
+    db=Depends(get_session),
+):
+    """One row per group (CVE / asset / component / etc.) with aggregates and
+    sample finding IDs. Use the usual filter params to narrow the universe
+    before grouping. `group_sort` is count (default) / severity / score /
+    assets / label."""
+    from ..queries import grouped_search
+    result = grouped_search(db, f, by=by, page=page, page_size=page_size, sort=group_sort)
+    result["filter"] = f.as_dict()
+    return result
 
 
 @router.get("/findings/remediated")

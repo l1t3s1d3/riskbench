@@ -38,13 +38,25 @@ class FindingFilter:
     overdue_only: bool = False
     undecided_only: bool = False
     q: str = ""
-    asset: str = ""
-    cve: str = ""
+    asset: str = ""                     # asset name ilike match (text search)
+    cve: str = ""                       # canonical_id ilike match (text search)
+    # Exact-match drill-down filters, used when the user clicks a row in a
+    # grouped view: they must match exactly so the resulting list matches the
+    # group header's counts.
+    asset_id: int | None = None
+    component: str = ""
+    component_version: str = ""
+    owner: str = ""
+    business_unit: str = ""
+    asset_type: str = ""
+    asset_group_id: int | None = None
+    ecosystem: str = ""                 # matches Finding.component_key prefix pkg:<ecosystem>/
     sort: str = "risk"          # risk | severity | age | asset | cve
     order: str = "desc"
 
     def as_dict(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if v not in ([], "", False)}
+        return {k: v for k, v in self.__dict__.items()
+                if v not in ([], "", False, None)}
 
 
 def build_resolution_map(db, now: dt.datetime | None = None) -> dict[int, Adjudication]:
@@ -126,13 +138,9 @@ def build_pending_map(db) -> dict[int, int]:
     return {fid: n for fid, n in rows}
 
 
-def _base_query(f: FindingFilter):
-    stmt = select(
-        Finding.id, Finding.severity, Finding.first_detected, Finding.source,
-        Finding.fix_available, Vuln.kev, Vuln.cvss_score, Vuln.canonical_id,
-        Asset.name, Finding.status,
-    ).join(Vuln, Finding.vuln_id == Vuln.id).join(Asset, Finding.asset_id == Asset.id)
-
+def _apply_filters(stmt, f: FindingFilter):
+    """SQL WHERE clauses shared between the list view, the facet counts, and
+    the grouped view. Any filter understood by one is understood by all."""
     if f.statuses:
         stmt = stmt.where(Finding.status.in_(f.statuses))
     if f.sources:
@@ -147,6 +155,22 @@ def _base_query(f: FindingFilter):
         stmt = stmt.where(Asset.name.ilike(f"%{f.asset}%"))
     if f.cve:
         stmt = stmt.where(Vuln.canonical_id.ilike(f"%{f.cve}%"))
+    if f.asset_id is not None:
+        stmt = stmt.where(Finding.asset_id == f.asset_id)
+    if f.component:
+        stmt = stmt.where(Finding.component == f.component)
+    if f.component_version:
+        stmt = stmt.where(Finding.component_version == f.component_version)
+    if f.owner:
+        stmt = stmt.where(Asset.owner == f.owner)
+    if f.business_unit:
+        stmt = stmt.where(Asset.business_unit == f.business_unit)
+    if f.asset_type:
+        stmt = stmt.where(Asset.asset_type == f.asset_type)
+    if f.asset_group_id is not None:
+        stmt = stmt.where(Asset.asset_group_id == f.asset_group_id)
+    if f.ecosystem:
+        stmt = stmt.where(Finding.component_key.like(f"pkg:{f.ecosystem}/%"))
     if f.q:
         term = f"%{f.q}%"
         stmt = stmt.where(or_(
@@ -155,6 +179,15 @@ def _base_query(f: FindingFilter):
             Finding.location.ilike(term),
         ))
     return stmt
+
+
+def _base_query(f: FindingFilter):
+    stmt = select(
+        Finding.id, Finding.severity, Finding.first_detected, Finding.source,
+        Finding.fix_available, Vuln.kev, Vuln.cvss_score, Vuln.canonical_id,
+        Asset.name, Finding.status,
+    ).join(Vuln, Finding.vuln_id == Vuln.id).join(Asset, Finding.asset_id == Asset.id)
+    return _apply_filters(stmt, f)
 
 
 @dataclass
@@ -408,6 +441,268 @@ def facets(db, f: FindingFilter) -> dict:
         "category": {c: n for c, n in cat_rows},
         "status": {s: n for s, n in status_rows},
     }
+
+
+# ---------------------------------------------------------------------------
+#  Grouped search: one row per CVE / asset / component / etc., with aggregates
+#  and sample finding ids so bulk actions (decide / ticket / assign) work on
+#  the whole group.
+# ---------------------------------------------------------------------------
+
+GROUPABLE = (
+    "cve", "asset", "component", "component_version",
+    "asset_type", "owner", "business_unit", "ecosystem",
+)
+
+# For each group dimension, the scope type a bulk decision on the group
+# should default to. Scopes are the vocabulary adjudications already use:
+# "vuln" survives across future re-detections of that CVE, "component"
+# survives across future findings in the same package, "finding" is
+# per-instance (used when the group has no durable scope).
+GROUP_SCOPE_SUGGESTION = {
+    "cve": "vuln",
+    "component": "component",       # only when component_key is present
+    "asset": "finding",
+    "component_version": "finding",
+    "asset_type": "finding",
+    "owner": "finding",
+    "business_unit": "finding",
+    "ecosystem": "finding",
+}
+
+
+def _group_cols():
+    """Columns needed to build a group row. Superset of _base_query for the
+    aggregates and labels the UI needs."""
+    return select(
+        Finding.id, Finding.severity, Finding.status, Finding.source,
+        Finding.first_detected, Finding.closed_at, Finding.component,
+        Finding.component_version, Finding.component_key,
+        Finding.fix_available, Finding.fix_version, Finding.asset_id,
+        Vuln.kev, Vuln.cvss_score, Vuln.canonical_id, Vuln.cve_id, Vuln.title,
+        Asset.name, Asset.asset_type, Asset.owner, Asset.business_unit,
+    ).join(Vuln, Finding.vuln_id == Vuln.id).join(Asset, Finding.asset_id == Asset.id)
+
+
+def _group_key(by: str, row) -> tuple[str, str] | None:
+    """Return (key, label) for this row's group, or None to drop the row
+    (e.g. grouping by owner when the asset has no owner set)."""
+    if by == "cve":
+        return row.canonical_id, (row.cve_id or row.canonical_id)
+    if by == "asset":
+        return str(row.asset_id), row.name
+    if by == "component":
+        if not row.component:
+            return None
+        return row.component, row.component
+    if by == "component_version":
+        if not row.component:
+            return None
+        key = f"{row.component}\u0001{row.component_version or ''}"
+        label = f"{row.component} {row.component_version}" if row.component_version else row.component
+        return key, label
+    if by == "asset_type":
+        if not row.asset_type:
+            return None
+        return row.asset_type, row.asset_type
+    if by == "owner":
+        if not row.owner:
+            return None
+        return row.owner, row.owner
+    if by == "business_unit":
+        if not row.business_unit:
+            return None
+        return row.business_unit, row.business_unit
+    if by == "ecosystem":
+        # component_key is normalised as pkg:<ecosystem>/<name>. Anything that
+        # doesn't fit (CodeQL rule keys, Wiz rule keys) is dropped from the
+        # ecosystem rollup because it has no package manager.
+        ck = row.component_key or ""
+        if not ck.startswith("pkg:") or "/" not in ck[4:]:
+            return None
+        eco = ck[4:].split("/", 1)[0]
+        return eco, eco
+    raise ValueError(f"Unknown group dimension: {by}")
+
+
+def grouped_search(db, f: FindingFilter, by: str,
+                   page: int = 1, page_size: int = 50,
+                   sort: str = "count") -> dict:
+    """One row per group. Aggregates respect the resolution map, so a decision
+    that adjusted severity is reflected in the group's effective-severity
+    counts, and accepted / false-positive findings sort down."""
+    if by not in GROUPABLE:
+        raise ValueError(f"by must be one of {GROUPABLE}")
+
+    resolution = build_resolution_map(db)
+    now = utcnow()
+    stmt = _apply_filters(_group_cols(), f)
+    rows = db.execute(stmt).all()
+
+    groups: dict[str, dict] = {}
+    for row in rows:
+        gk = _group_key(by, row)
+        if gk is None:
+            continue
+        key, label = gk
+
+        adj = resolution.get(row.id)
+        eff_sev = row.severity
+        disp = None
+        if adj is not None:
+            disp = adj.disposition
+            if adj.disposition == Disposition.ADJUST_RISK.value and adj.adjusted_severity:
+                eff_sev = adj.adjusted_severity
+
+        # Apply the same post-resolution filters that search() applies, so
+        # grouped counts and the drilled-down list agree.
+        if f.severities and eff_sev not in f.severities:
+            continue
+        if f.undecided_only and adj is not None:
+            continue
+        if f.dispositions:
+            want_none = "none" in f.dispositions
+            key_disp = disp if disp is not None else "none"
+            if key_disp not in f.dispositions and not (disp is None and want_none):
+                continue
+
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "key": key, "label": label,
+                "finding_count": 0,
+                "asset_ids": set(),
+                "sources": set(),
+                "severity_counts": {},         # effective severity rollup
+                "status_counts": {},
+                "disposition_counts": {},
+                "kev_count": 0,
+                "fix_available_count": 0,
+                "max_score": 0.0,
+                "oldest_open_detected": None,
+                "newest_detected": None,
+                "sample_titles": set(),
+                "sample_finding_ids": [],
+                # Per-dimension extras used by the UI
+                "canonical_id": row.canonical_id if by == "cve" else None,
+                "cve_id": row.cve_id if by == "cve" else None,
+                "title": row.title if by == "cve" else None,
+                "component_key": row.component_key if by in ("component", "component_version") else None,
+                "asset_type": row.asset_type if by == "asset" else None,
+                "component": row.component if by == "component_version" else None,
+                "component_version": row.component_version if by == "component_version" else None,
+                "fix_versions": set(),
+            }
+        g["finding_count"] += 1
+        g["asset_ids"].add(row.asset_id)
+        g["sources"].add(row.source)
+        g["severity_counts"][eff_sev] = g["severity_counts"].get(eff_sev, 0) + 1
+        g["status_counts"][row.status] = g["status_counts"].get(row.status, 0) + 1
+        g["disposition_counts"][disp or "none"] = g["disposition_counts"].get(disp or "none", 0) + 1
+        if row.kev:
+            g["kev_count"] += 1
+        if row.fix_available:
+            g["fix_available_count"] += 1
+            if row.fix_version:
+                g["fix_versions"].add(row.fix_version)
+        proxy = _proxy_score(eff_sev, bool(row.kev), row.cvss_score, row.fix_available, disp)
+        if proxy > g["max_score"]:
+            g["max_score"] = proxy
+        fd = row.first_detected
+        if fd is not None:
+            if fd.tzinfo is None:
+                fd = fd.replace(tzinfo=dt.timezone.utc)
+            if g["newest_detected"] is None or fd > g["newest_detected"]:
+                g["newest_detected"] = fd
+            if row.status == "open" and (g["oldest_open_detected"] is None or fd < g["oldest_open_detected"]):
+                g["oldest_open_detected"] = fd
+        if len(g["sample_finding_ids"]) < 500:
+            g["sample_finding_ids"].append(row.id)
+        if row.title and len(g["sample_titles"]) < 3:
+            g["sample_titles"].add(row.title)
+
+    # Serialise, compute max severity, and attach the scope suggestion
+    result_rows = []
+    for g in groups.values():
+        max_sev = _max_severity(g["severity_counts"])
+        suggested_scope = GROUP_SCOPE_SUGGESTION[by]
+        suggested_scope_key = None
+        if suggested_scope == "vuln" and by == "cve":
+            suggested_scope_key = g["canonical_id"]
+        elif suggested_scope == "component":
+            # Only usable when a component_key is normalised (pkg:...), otherwise
+            # fall back to per-finding scope so decisions still work.
+            if g["component_key"]:
+                suggested_scope_key = g["component_key"]
+            else:
+                suggested_scope = "finding"
+        result_rows.append({
+            "key": g["key"],
+            "label": g["label"],
+            "finding_count": g["finding_count"],
+            "asset_count": len(g["asset_ids"]),
+            "sources": sorted(g["sources"]),
+            "max_severity": max_sev,
+            "severity_counts": g["severity_counts"],
+            "status_counts": g["status_counts"],
+            "disposition_counts": g["disposition_counts"],
+            "kev_count": g["kev_count"],
+            "fix_available_count": g["fix_available_count"],
+            "fix_versions": sorted(g["fix_versions"])[:5],
+            "max_score": round(g["max_score"], 1),
+            "oldest_open_detected": _iso(g["oldest_open_detected"]),
+            "newest_detected": _iso(g["newest_detected"]),
+            "sample_titles": sorted(g["sample_titles"]),
+            "sample_finding_ids": g["sample_finding_ids"],
+            "canonical_id": g["canonical_id"],
+            "cve_id": g["cve_id"],
+            "title": g["title"],
+            "component": g["component"] or (g["label"] if by == "component" else None),
+            "component_version": g["component_version"],
+            "component_key": g["component_key"],
+            "asset_type": g["asset_type"],
+            "suggested_scope": suggested_scope,
+            "suggested_scope_key": suggested_scope_key,
+        })
+
+    # Sort
+    def _sortkey(r):
+        rank = Severity(r["max_severity"]).rank if r["max_severity"] in Severity._value2member_map_ else 0
+        if sort == "severity":
+            return (rank, r["max_score"], r["finding_count"])
+        if sort == "assets":
+            return (r["asset_count"], rank, r["finding_count"])
+        if sort == "score":
+            return (r["max_score"], rank, r["finding_count"])
+        if sort == "label":
+            return (-ord(r["label"][:1].lower()) if r["label"] else 0,)
+        # default: count
+        return (r["finding_count"], rank, r["max_score"])
+
+    reverse = f.order != "asc" and sort != "label"
+    result_rows.sort(key=_sortkey, reverse=reverse)
+    if sort == "label":
+        result_rows.sort(key=lambda r: (r["label"] or "").lower(), reverse=(f.order != "asc"))
+
+    total = len(result_rows)
+    start = max(0, (page - 1) * page_size)
+    return {
+        "group_by": by,
+        "total_groups": total,
+        "total_findings": sum(r["finding_count"] for r in result_rows),
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+        "groups": result_rows[start:start + page_size],
+    }
+
+
+def _max_severity(sev_counts: dict) -> str:
+    """The worst severity present in the group's effective-severity rollup."""
+    for sev in ("critical", "high", "medium", "low", "info"):
+        if sev_counts.get(sev):
+            return sev
+    return "info"
 
 
 def _iso(value: dt.datetime | None) -> str | None:
