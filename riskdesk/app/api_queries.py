@@ -62,9 +62,12 @@ query VulnerabilityFindings($filterBy: VulnerabilityFindingFilters, $first: Int,
           subscriptionExternalId
           subscriptionName
           region
-          hasLimitedInternetExposure
-          hasHighInternetExposure
           tags
+          # Note: exposure fields (hasHighInternetExposure /
+          # hasLimitedInternetExposure) are no longer on this type in current
+          # Wiz tenants -- they moved into the Attack Surface / exposure
+          # graph. _exposure() falls back to None (unknown) without them,
+          # which the risk engine treats as "factor not applied".
         }
       }
     }

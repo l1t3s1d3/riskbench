@@ -103,6 +103,10 @@ a { color: var(--seal); }
 .view { display: grid; grid-template-columns: var(--rail-w) 1fr; height: calc(100vh - 57px); }
 .view[hidden] { display: none; }
 .view:has(.pane.wide) { grid-template-columns: 1fr; }
+/* Wide panes hold stacked sections that can run past viewport height, so they
+   scroll as a whole rather than relying on an inner .rows child (which only
+   exists in the findings-list layout). */
+.pane.wide { overflow-y: auto; }
 
 .rail { border-right: 1px solid var(--rule); background: var(--panel); overflow: hidden; }
 .rail-scroll { height: 100%; overflow-y: auto; padding: 16px 16px 40px; }
