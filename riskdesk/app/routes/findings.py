@@ -328,6 +328,8 @@ def verify_finding(finding_id: int, request: Request, body: dict | None = Body(d
         detail={"note": note},
     ))
     db.commit()
+    from ..cache import invalidate_all
+    invalidate_all()
     return {"ok": True, "finding_id": finding_id, "status": "verified_fixed"}
 
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from .config import settings
+from .cache import invalidate_all as invalidate_cache
 from .enums import (
     RISK_DECISION_DISPOSITIONS, Disposition, AdjudicationState, ScopeType,
 )
@@ -211,6 +212,7 @@ def create_decisions(
         created.append(adj)
 
     db.commit()
+    invalidate_cache()
     return created
 
 
@@ -251,6 +253,7 @@ def decide(db, adjudication_id: int, approve: bool, actor: str,
                 detail={"renewal_id": adj.id},
             ))
     db.commit()
+    invalidate_cache()
     return adj
 
 
@@ -272,6 +275,7 @@ def revoke(db, adjudication_id: int, actor: str, reason: str) -> Adjudication:
         detail={"reason": reason},
     ))
     db.commit()
+    invalidate_cache()
     return adj
 
 
@@ -323,6 +327,7 @@ def renew(db, adjudication_id: int, actor: str, justification: str,
         detail={"previous_id": old.id, "expires_at": expires_at.isoformat()},
     ))
     db.commit()
+    invalidate_cache()
     return new
 
 
@@ -350,6 +355,7 @@ def expire_lapsed(db, actor: str = "system") -> int:
         ))
     if rows:
         db.commit()
+        invalidate_cache()
     return len(rows)
 
 

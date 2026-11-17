@@ -178,6 +178,10 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
             "auto_assigned": assign_stats.get("assigned", 0) if assign_stats else 0,
         }
         _notify_complete(source, result)
+        # A completed sync changes counts, severities, and often decision
+        # coverage. Flush the TTL cache so the next page load sees fresh data.
+        from .cache import invalidate_all
+        invalidate_all()
         db.close()
     return result
 
@@ -374,6 +378,8 @@ def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord
             "error": run.error, **stats,
             "new_by_severity": new_severity,
         }
+        from .cache import invalidate_all
+        invalidate_all()
         db.close()
     return result
 

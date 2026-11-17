@@ -204,6 +204,10 @@ class Row:
     sort_key: tuple
 
 
+from .cache import cached
+
+
+@cached("search")
 def search(db, f: FindingFilter, page: int = 1, page_size: int = 50) -> dict:
     """Returns a page of hydrated findings plus the full matching id set.
 
@@ -398,6 +402,7 @@ def _serialize_adj(a: Adjudication) -> dict:
     }
 
 
+@cached("facets")
 def facets(db, f: FindingFilter) -> dict:
     """Counts for the filter rail, computed against the same filter minus the
     dimension being counted, so a facet never shows zero for a value you could
@@ -525,6 +530,7 @@ def _group_key(by: str, row) -> tuple[str, str] | None:
     raise ValueError(f"Unknown group dimension: {by}")
 
 
+@cached("grouped_search")
 def grouped_search(db, f: FindingFilter, by: str,
                    page: int = 1, page_size: int = 50,
                    sort: str = "count") -> dict:
