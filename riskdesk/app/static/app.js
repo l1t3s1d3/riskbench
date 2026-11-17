@@ -178,6 +178,7 @@ async function boot() {
   $('regBulkClear').onclick = () => { state.register.selected.clear(); loadRegister(); };
 
   await loadFindings();
+  startSyncWatcher();
 }
 
 function debounce(fn, ms) {
@@ -189,6 +190,7 @@ function switchView(view) {
   state.view = view;
   [...$('tabs').children].forEach((t) => t.classList.toggle('is-active', t.dataset.view === view));
   ['findings', 'register', 'activity', 'compliance', 'exceptions', 'rules', 'sources', 'tickets', 'settings'].forEach((v) => { $(`view-${v}`).hidden = v !== view; });
+  if (view === 'findings') clearFindingsBadge();
   if (view === 'register') loadRegister();
   if (view === 'activity') loadActivity();
   if (view === 'compliance') loadCompliance();
@@ -197,6 +199,113 @@ function switchView(view) {
   if (view === 'sources') loadSources();
   if (view === 'tickets') loadTickets();
   if (view === 'settings') loadSettings();
+}
+
+// --- Background sync watcher ------------------------------------------------
+// Poll /api/sync/runs so the user knows a sync is happening (or just finished)
+// without being on the Sources tab. Shows:
+//   - pulsing dot on "Sources" while any run is in-flight
+//   - "N new" badge on "Findings" when a sync completes with new findings
+// Click Findings to clear the badge.
+
+const SYNC_POLL_FOCUSED_MS = 5_000;
+const SYNC_POLL_HIDDEN_MS  = 30_000;
+const LAST_SEEN_KEY = 'riskdesk:lastSeenRunId';
+
+let _newSinceLastVisit = 0;
+let _syncPollTimer = null;
+let _lastSeenRunId = null;
+
+function loadLastSeenRunId() {
+  try {
+    const v = localStorage.getItem(LAST_SEEN_KEY);
+    return v ? Number(v) : null;
+  } catch (_) { return null; }
+}
+function saveLastSeenRunId(id) {
+  try { localStorage.setItem(LAST_SEEN_KEY, String(id)); } catch (_) {}
+}
+
+function setTabBadge(tabKey, html) {
+  const tab = document.querySelector(`.tab[data-view="${tabKey}"]`);
+  if (!tab) return;
+  const existing = tab.querySelector('.tab-dot, .tab-badge');
+  if (existing) existing.remove();
+  if (html) tab.insertAdjacentHTML('beforeend', html);
+}
+
+function clearFindingsBadge() {
+  _newSinceLastVisit = 0;
+  setTabBadge('findings', '');
+}
+
+async function pollSyncRuns() {
+  try {
+    const runs = await api('/api/sync/runs?limit=10');
+    // Any run currently in-flight -> pulsing dot on Sources
+    const running = runs.some((r) => !r.finished_at || r.status === 'running');
+    setTabBadge('sources', running ? '<span class="tab-dot is-running" title="Sync in progress"></span>' : '');
+
+    if (_lastSeenRunId === null) {
+      // First poll of this session -- seed from localStorage or the current max,
+      // so we don't fire notifications for history on first load.
+      const saved = loadLastSeenRunId();
+      _lastSeenRunId = saved !== null ? saved : (runs[0] ? runs[0].id : 0);
+    }
+
+    // Any completed run newer than what we've seen -> toast + findings badge
+    const fresh = runs.filter(
+      (r) => r.id > _lastSeenRunId && r.finished_at && r.status === 'ok'
+    );
+    if (fresh.length) {
+      const newFindings = fresh.reduce((s, r) => s + (r.new || 0), 0);
+      if (newFindings > 0 && state.view !== 'findings') {
+        _newSinceLastVisit += newFindings;
+        setTabBadge('findings',
+          `<span class="tab-badge" title="${_newSinceLastVisit} new findings since you last viewed the list">${_newSinceLastVisit}</span>`);
+      }
+      // Toast per finished source (dedup if multiple)
+      const bySource = {};
+      fresh.forEach((r) => {
+        bySource[r.source] = (bySource[r.source] || { new: 0, findings: 0, closed: 0 });
+        bySource[r.source].new += r.new || 0;
+        bySource[r.source].findings += r.findings || 0;
+        bySource[r.source].closed += r.closed || 0;
+      });
+      for (const [src, s] of Object.entries(bySource)) {
+        toast(`${src} sync done: ${s.new} new, ${s.closed} closed, ${s.findings} total`);
+      }
+      // Refresh the view the user is currently on if it depends on findings data
+      if (state.view === 'findings') loadFindings();
+      if (state.view === 'sources') loadSources();
+    }
+
+    // Advance the pointer to the newest completed run we saw
+    const maxCompletedId = runs
+      .filter((r) => r.finished_at)
+      .reduce((m, r) => Math.max(m, r.id), _lastSeenRunId);
+    if (maxCompletedId > _lastSeenRunId) {
+      _lastSeenRunId = maxCompletedId;
+      saveLastSeenRunId(maxCompletedId);
+    }
+  } catch (_) {
+    // Network blips are fine -- try again next tick.
+  } finally {
+    scheduleSyncPoll();
+  }
+}
+
+function scheduleSyncPoll() {
+  if (_syncPollTimer) clearTimeout(_syncPollTimer);
+  const delay = document.hidden ? SYNC_POLL_HIDDEN_MS : SYNC_POLL_FOCUSED_MS;
+  _syncPollTimer = setTimeout(pollSyncRuns, delay);
+}
+
+function startSyncWatcher() {
+  pollSyncRuns();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) pollSyncRuns();
+  });
 }
 
 function refresh() {
@@ -1730,6 +1839,10 @@ async function syncSource(key, demo) {
   const last = $(`last-${key}`);
   el.textContent = demo ? 'Generating demo data\u2026' : 'Syncing\u2026 this can take a few minutes on the first run.';
   if (bar) bar.classList.add('on');
+  // Kick the background watcher immediately so the Sources-tab "running" dot
+  // and the Findings-tab "new" badge reflect this sync as soon as the request
+  // starts, not at the next 5-second tick.
+  if (typeof pollSyncRuns === 'function') setTimeout(pollSyncRuns, 50);
 
   // Stream progress via SSE while the POST runs in parallel. Close the
   // stream on completion or on sync failure.
@@ -1771,6 +1884,9 @@ async function syncSource(key, demo) {
       }
     } catch (_) {}
     loadSources();
+    // One more poll so the global watcher's running-dot clears and the
+    // findings-tab badge appears without waiting another 5 seconds.
+    if (typeof pollSyncRuns === 'function') setTimeout(pollSyncRuns, 50);
   }
 }
 
