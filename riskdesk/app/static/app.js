@@ -1649,14 +1649,26 @@ const SOURCE_INFO = {
 async function loadSources() {
   const meta = await api('/api/meta');
   state.meta = meta;
+  const runs = await api('/api/sync/runs?limit=40');
+  // Most recent run per source, for the "last sync" line on each card.
+  const latest = {};
+  for (const r of runs) {
+    if (!latest[r.source]) latest[r.source] = r;
+  }
+
   $('sourceCards').innerHTML = Object.entries(SOURCE_INFO).map(([key, [name, blurb]]) => {
     const on = meta.connectors[key];
+    const last = latest[key];
     return `<div class="source-card" data-source="${key}">
       <h4><span class="dot ${on ? 'on' : ''}"></span>${esc(name)}</h4>
       <div class="hint" style="margin:0 0 8px">${esc(blurb)}</div>
       <div class="status" id="status-${key}">${on
         ? 'Credentials are configured. Test the connection before the first sync.'
         : 'Not configured. Add its credentials to .env, or load demo data to try the interface.'}</div>
+      <div class="sync-progress" id="progress-${key}"><div class="sync-progress-bar"></div></div>
+      <div class="last-sync ${last && last.status !== 'ok' ? 'is-bad' : ''}" id="last-${key}">
+        ${lastSyncLabel(last)}
+      </div>
       <div class="actions">
         <button class="btn-ghost" onclick="testSource('${key}')">Test connection</button>
         <button class="btn-ghost" onclick="syncSource('${key}', false)"${on ? '' : ' disabled'}>Sync now</button>
@@ -1665,7 +1677,6 @@ async function loadSources() {
     </div>`;
   }).join('');
 
-  const runs = await api('/api/sync/runs?limit=40');
   $('syncList').innerHTML = runs.length ? runs.map((r) => `
     <div class="row" style="grid-template-columns:30px 1fr 220px 150px 120px;cursor:default">
       <div class="edge ${r.status === 'ok' ? 'sev-low' : 'sev-critical'}"></div>
@@ -1693,9 +1704,47 @@ async function testSource(key) {
   }
 }
 
+function lastSyncLabel(r) {
+  if (!r) return 'Last sync: never';
+  const ts = new Date(r.started_at);
+  const abs = ts.toLocaleString();
+  const rel = relativeTime(ts);
+  const status = r.status === 'ok' ? 'ok' : r.status;
+  const bits = [`${r.findings.toLocaleString()} findings`];
+  if (r.new) bits.push(`${r.new} new`);
+  if (r.closed) bits.push(`${r.closed} closed`);
+  return `Last sync: ${rel} (${abs}) \u00b7 ${status} \u00b7 ${bits.join(' / ')}`;
+}
+
+function relativeTime(date) {
+  const diff = (Date.now() - date.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+  return `${Math.round(diff / 86400)}d ago`;
+}
+
 async function syncSource(key, demo) {
   const el = $(`status-${key}`);
+  const bar = $(`progress-${key}`);
+  const last = $(`last-${key}`);
   el.textContent = demo ? 'Generating demo data\u2026' : 'Syncing\u2026 this can take a few minutes on the first run.';
+  if (bar) bar.classList.add('on');
+
+  // Stream progress via SSE while the POST runs in parallel. Close the
+  // stream on completion or on sync failure.
+  let evt = null;
+  try {
+    evt = new EventSource(`/api/sync/progress/${key}`);
+    evt.addEventListener('progress', (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        el.textContent = `Syncing\u2026 ${d.findings.toLocaleString()} findings (${d.new} new) across ${d.assets} assets so far.`;
+      } catch (_) {}
+    });
+    evt.addEventListener('complete', () => { if (evt) { evt.close(); evt = null; } });
+  } catch (_) { /* SSE unsupported; ignore */ }
+
   try {
     const r = await api(`/api/sync/${key}?demo=${demo}`, { method: 'POST' });
     if (r.status === 'ok') {
@@ -1706,10 +1755,22 @@ async function syncSource(key, demo) {
       el.textContent = r.error;
       el.style.color = 'var(--seal)';
     }
-    loadSources();
   } catch (e) {
     el.textContent = e.message;
     el.style.color = 'var(--seal)';
+  } finally {
+    if (bar) bar.classList.remove('on');
+    if (evt) evt.close();
+    // Refresh the last-sync line and schedule card.
+    try {
+      const runs = await api('/api/sync/runs?limit=5');
+      const r = runs.find((x) => x.source === key);
+      if (last) {
+        last.textContent = lastSyncLabel(r);
+        last.classList.toggle('is-bad', r && r.status !== 'ok');
+      }
+    } catch (_) {}
+    loadSources();
   }
 }
 
