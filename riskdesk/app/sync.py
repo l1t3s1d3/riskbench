@@ -182,6 +182,8 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
         # coverage. Flush the TTL cache so the next page load sees fresh data.
         from .cache import invalidate_all
         invalidate_all()
+        from .rollup import mark_stale
+        mark_stale(db)
         db.close()
     return result
 
@@ -380,6 +382,8 @@ def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord
         }
         from .cache import invalidate_all
         invalidate_all()
+        from .rollup import mark_stale
+        mark_stale(db)
         db.close()
     return result
 

@@ -330,85 +330,18 @@ def verify_finding(finding_id: int, request: Request, body: dict | None = Body(d
     db.commit()
     from ..cache import invalidate_all
     invalidate_all()
+    from ..rollup import mark_stale
+    mark_stale(db)
     return {"ok": True, "finding_id": finding_id, "status": "verified_fixed"}
 
 
 @router.get("/dashboard", response_model=DashboardOut)
 def dashboard(db=Depends(get_session)):
+    from ..rollup import get_rollup, live_extras
     now = dt.datetime.now(dt.timezone.utc)
-    resolution = build_resolution_map(db)
-
-    rows = db.execute(
-        select(Finding.id, Finding.severity, Finding.source, Finding.first_detected,
-               Vuln.kev)
-        .join(Vuln, Finding.vuln_id == Vuln.id)
-        .where(Finding.status == "open")
-    ).all()
-
-    by_severity: dict[str, int] = {}
-    by_source: dict[str, int] = {}
-    by_disposition: dict[str, int] = {}
-    overdue = 0
-    kev_open = 0
-
-    for fid, sev, source, first_detected, kev in rows:
-        adj = resolution.get(fid)
-        eff = sev
-        disp = adj.disposition if adj else "none"
-        if adj and adj.disposition == Disposition.ADJUST_RISK.value and adj.adjusted_severity:
-            eff = adj.adjusted_severity
-        by_severity[eff] = by_severity.get(eff, 0) + 1
-        by_source[source] = by_source.get(source, 0) + 1
-        by_disposition[disp] = by_disposition.get(disp, 0) + 1
-        if kev:
-            kev_open += 1
-        if sla_status(first_detected, eff, bool(kev), adj, now)[1]:
-            overdue += 1
-
-    pending = db.execute(
-        select(func.count()).select_from(Adjudication)
-        .where(Adjudication.state == "pending_approval")
-    ).scalar() or 0
-
-    horizon = now + dt.timedelta(days=30)
-    expiring = db.execute(
-        select(func.count()).select_from(Adjudication)
-        .where(Adjudication.state == "approved",
-               Adjudication.expires_at.isnot(None),
-               Adjudication.expires_at > now,
-               Adjudication.expires_at <= horizon)
-    ).scalar() or 0
-    review_due = db.execute(
-        select(func.count()).select_from(Adjudication)
-        .where(Adjudication.state == "approved",
-               Adjudication.review_due.isnot(None),
-               Adjudication.review_due <= now)
-    ).scalar() or 0
-
-    runs = db.execute(
-        select(SyncRun).order_by(SyncRun.started_at.desc()).limit(6)
-    ).scalars().all()
-
-    return {
-        "open_findings": len(rows),
-        "unique_vulns": db.execute(select(func.count()).select_from(Vuln)).scalar(),
-        "assets": db.execute(select(func.count()).select_from(Asset)).scalar(),
-        "by_severity": by_severity,
-        "by_source": by_source,
-        "by_disposition": by_disposition,
-        "overdue": overdue,
-        "kev_open": kev_open,
-        "undecided": by_disposition.get("none", 0),
-        "pending_approvals": pending,
-        "expiring_30d": expiring,
-        "review_overdue": review_due,
-        "recent_syncs": [{
-            "id": r.id, "source": r.source, "status": r.status,
-            "started_at": r.started_at.isoformat() if r.started_at else None,
-            "findings": r.findings_upserted, "new": r.findings_new,
-            "closed": r.findings_closed, "error": r.error,
-        } for r in runs],
-    }
+    payload = get_rollup(db, now)
+    payload.update(live_extras(db, now))
+    return payload
 
 
 @router.get("/audit", response_model=AuditPageOut)

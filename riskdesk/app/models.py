@@ -305,6 +305,21 @@ class SyncRun(Base):
     delta = Column(JSON, default=dict)
 
 
+class DashboardRollup(Base):
+    """Singleton row holding the materialized dashboard payload.
+
+    The dashboard computation walks every open finding and resolves
+    adjudication per-row to derive effective severity. At scale that loop
+    dominates. We cache the result in a single row and mark it stale on
+    any mutation that would change the numbers; the next read rebuilds.
+    """
+    __tablename__ = "dashboard_rollup"
+    id = Column(Integer, primary_key=True)
+    generated_at = Column(DateTime, nullable=True)
+    stale = Column(Boolean, default=True, nullable=False)
+    data = Column(JSON, default=dict)
+
+
 class SyncSchedule(Base):
     """Per-source import schedule.
 

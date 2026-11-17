@@ -23,6 +23,11 @@ from sqlalchemy import select
 
 from .config import settings
 from .cache import invalidate_all as invalidate_cache
+
+
+def _mark_rollup_stale(db):
+    from .rollup import mark_stale
+    mark_stale(db)
 from .enums import (
     RISK_DECISION_DISPOSITIONS, Disposition, AdjudicationState, ScopeType,
 )
@@ -213,6 +218,7 @@ def create_decisions(
 
     db.commit()
     invalidate_cache()
+    _mark_rollup_stale(db)
     return created
 
 
@@ -254,6 +260,7 @@ def decide(db, adjudication_id: int, approve: bool, actor: str,
             ))
     db.commit()
     invalidate_cache()
+    _mark_rollup_stale(db)
     return adj
 
 
@@ -276,6 +283,7 @@ def revoke(db, adjudication_id: int, actor: str, reason: str) -> Adjudication:
     ))
     db.commit()
     invalidate_cache()
+    _mark_rollup_stale(db)
     return adj
 
 
@@ -328,6 +336,7 @@ def renew(db, adjudication_id: int, actor: str, justification: str,
     ))
     db.commit()
     invalidate_cache()
+    _mark_rollup_stale(db)
     return new
 
 
@@ -356,6 +365,7 @@ def expire_lapsed(db, actor: str = "system") -> int:
     if rows:
         db.commit()
         invalidate_cache()
+        _mark_rollup_stale(db)
     return len(rows)
 
 

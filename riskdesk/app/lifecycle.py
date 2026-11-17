@@ -652,6 +652,8 @@ def import_historical(db, rows: list[dict], actor: str) -> dict:
     if created:
         from .cache import invalidate_all
         invalidate_all()
+        from .rollup import mark_stale
+        mark_stale(db)
     return {
         "ok": errors == 0,
         "processed": len(rows),
