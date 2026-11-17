@@ -49,6 +49,7 @@ def init_db():
     from . import models  # noqa: F401  (registers tables)
     Base.metadata.create_all(engine)
     add_missing_columns(engine)
+    add_missing_indexes(engine)
 
 
 def add_missing_columns(bind) -> list[str]:
@@ -88,4 +89,36 @@ def add_missing_columns(bind) -> list[str]:
                     idx.create(conn, checkfirst=True)
     if added:
         logging.info("Schema migration added columns: %s", ", ".join(added))
+    return added
+
+
+def add_missing_indexes(bind) -> list[str]:
+    """Create any index declared on the model that is missing from the live
+    DB. create_all does this for new tables, but when a new Index() is added
+    to an existing table's __table_args__ nothing picks it up. This closes
+    that gap so performance-critical indexes land automatically on upgrade."""
+    import logging
+
+    from sqlalchemy import inspect
+
+    insp = inspect(bind)
+    existing_tables = set(insp.get_table_names())
+    added: list[str] = []
+    with bind.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            existing = {idx["name"] for idx in insp.get_indexes(table.name)}
+            # Both explicit Index() entries and the single-column index=True
+            # indexes live under table.indexes.
+            for idx in table.indexes:
+                if idx.name in existing:
+                    continue
+                try:
+                    idx.create(conn, checkfirst=True)
+                    added.append(idx.name)
+                except Exception as exc:
+                    logging.warning("Could not create index %s: %s", idx.name, exc)
+    if added:
+        logging.info("Created missing indexes: %s", ", ".join(added))
     return added

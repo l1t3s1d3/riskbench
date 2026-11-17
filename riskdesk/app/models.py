@@ -63,6 +63,10 @@ class Asset(Base):
     __table_args__ = (
         UniqueConstraint("source", "source_asset_id", name="uq_asset_source"),
         Index("ix_asset_name", "name"),
+        # Drill-down filters from the Grouped Findings view (group by owner /
+        # asset type). Business_unit already has a per-column index.
+        Index("ix_asset_owner", "owner"),
+        Index("ix_asset_type", "asset_type"),
     )
 
 
@@ -159,6 +163,14 @@ class Finding(Base):
     __table_args__ = (
         UniqueConstraint("source", "source_finding_id", name="uq_finding_source"),
         Index("ix_finding_triage", "status", "severity", "source"),
+        # Hot-path indexes for the Grouped view, remediation reporting, and
+        # SLA queries. Each one targets a query pattern that currently does a
+        # full table scan: group-by-component, remediated-since-date, and
+        # age-based scoring.
+        Index("ix_finding_component", "component"),
+        Index("ix_finding_closed_at", "closed_at"),
+        Index("ix_finding_asset_status", "asset_id", "status"),
+        Index("ix_finding_status_first_detected", "status", "first_detected"),
     )
 
 
