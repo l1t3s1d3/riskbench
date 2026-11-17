@@ -645,6 +645,33 @@ class TicketFinding(Base):
     )
 
 
+class DecisionTemplate(Base):
+    """A reusable preset for the Decide dialog.
+
+    An approver picks a template and the Decide form fills in disposition,
+    justification, suggested scope, expiry, compensating controls, and any
+    adjust-risk severity override. Templates are the house pattern for the
+    80% of decisions that share a shape, so reviewers aren't re-typing the
+    same rationale sentence by sentence.
+    """
+    __tablename__ = "decision_templates"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(256), nullable=False)
+    description = Column(Text)
+    disposition = Column(String(32), nullable=False)
+    scope = Column(String(32), default="finding")       # default scope suggestion
+    justification_text = Column(Text, nullable=False)
+    compensating_controls = Column(Text)
+    adjusted_severity = Column(String(16), nullable=True)
+    adjusted_priority = Column(String(8), nullable=True)
+    expiry_days = Column(Integer, nullable=True)        # for risk decisions
+    remediation_days = Column(Integer, nullable=True)   # for routing decisions
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_by = Column(String(256))
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Ticket(Base):
     """An external ticket (Jira, ServiceNow, etc.) linked to one or more findings.
 

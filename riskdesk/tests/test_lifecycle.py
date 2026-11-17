@@ -505,6 +505,154 @@ def test_detection_category_appears_in_facets_and_metrics(sync, db, client):
     assert r["findings"][0]["canonical_id"] == "falcon-detect:ProcessInjection"
 
 
+# --- approval workspace (queue, bulk-decide, context, templates) ----------
+
+def _pending(db, finding_id, requested_by="admin1", approver="executive1"):
+    from app.adjudication import create_decisions
+    return create_decisions(
+        db, [finding_id], "accept_risk",
+        "Compensating WAF rule and runbook; patched Q2.",
+        actor=requested_by, approver=approver, scope="vuln_on_asset",
+    )[0]
+
+
+def test_approval_queue_filters_to_my_approvals(client, db, seed_data):
+    """'approver=me' returns decisions I'm named as approver on (plus any with
+    no named approver). The requester of a decision is not themselves the
+    approver, and vice-versa."""
+    adj = _pending(db, seed_data["finding"].id, approver="executive1")
+    # executive1 (named approver) sees it in their queue
+    r = client.get("/api/adjudications/queue?approver=me",
+                   headers={"X-RiskDesk-User": "executive1"}).json()
+    assert r["can_approve"] is True
+    assert adj.id in [d["id"] for d in r["decisions"]]
+    # A different approver (executive2) does not see it in "mine", because the
+    # approver is named and it is not them.
+    r2 = client.get("/api/adjudications/queue?approver=me",
+                    headers={"X-RiskDesk-User": "executive2"}).json()
+    assert adj.id not in [d["id"] for d in r2["decisions"]]
+    # But "approver=any" shows every pending decision regardless of who owns it.
+    r3 = client.get("/api/adjudications/queue?approver=any",
+                    headers={"X-RiskDesk-User": "executive2"}).json()
+    assert adj.id in [d["id"] for d in r3["decisions"]]
+
+
+def test_approval_queue_age_bands(client, db, seed_data):
+    adj = _pending(db, seed_data["finding"].id)
+    adj.requested_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=20)
+    db.commit()
+    r = client.get("/api/adjudications/queue?approver=me",
+                   headers={"X-RiskDesk-User": "executive1"}).json()
+    assert r["age_bands"]["stale"] >= 1
+    aged = next(d for d in r["decisions"] if d["id"] == adj.id)
+    assert aged["age_days"] >= 20
+
+
+def test_bulk_decide_approves_many(client, db, seed_data):
+    from app.models import Asset, Finding, Vuln
+    v = Vuln(canonical_id="CVE-2024-BULK", severity="high")
+    db.add(v); db.flush()
+    adjs = []
+    for i in range(3):
+        a = Asset(source="wiz", source_asset_id=f"host-bulk-{i}", name=f"host-bulk-{i}",
+                  asset_type="server")
+        db.add(a); db.flush()
+        f = Finding(source="wiz", source_finding_id=f"bulk-{i}", asset_id=a.id,
+                    vuln_id=v.id, category="os_vuln", status="open", severity="high")
+        db.add(f); db.flush()
+        adjs.append(_pending(db, f.id))
+    r = client.post("/api/adjudications/bulk-decide",
+                    json={"adjudication_ids": [a.id for a in adjs], "approve": True,
+                          "note": "Bulk approved as per quarterly review"},
+                    headers={"X-RiskDesk-User": "executive1"}).json()
+    assert r["succeeded"] == 3 and r["failed"] == 0
+    for a in adjs:
+        db.refresh(a)
+        assert a.state == "approved" and a.approved_by == "executive1"
+
+
+def test_bulk_decide_rejects_non_approver(client, db, seed_data):
+    adj = _pending(db, seed_data["finding"].id)
+    r = client.post("/api/adjudications/bulk-decide",
+                    json={"adjudication_ids": [adj.id], "approve": True},
+                    headers={"X-RiskDesk-User": "team1"})
+    assert r.status_code == 403
+
+
+def test_bulk_decide_separates_successes_and_failures(client, db, seed_data):
+    """One bad id in a bulk call does not abort the rest."""
+    adj = _pending(db, seed_data["finding"].id)
+    r = client.post("/api/adjudications/bulk-decide",
+                    json={"adjudication_ids": [adj.id, 99999], "approve": True,
+                          "note": "batch"},
+                    headers={"X-RiskDesk-User": "executive1"}).json()
+    assert r["succeeded"] == 1 and r["failed"] == 1
+    assert r["results"]["failed"][0]["id"] == 99999
+
+
+def test_decide_context_surfaces_prior_peer_tickets(client, db, seed_data):
+    from app.adjudication import create_decisions, decide
+    from app.models import Asset, Finding, Ticket, TicketFinding, Vuln
+    # A prior approved decision on the same CVE on another asset -> peer match
+    other_asset = Asset(source="wiz", source_asset_id="other", name="other-host",
+                        asset_type="server")
+    db.add(other_asset); db.flush()
+    other_finding = Finding(
+        source="wiz", source_finding_id="other-1",
+        asset_id=other_asset.id, vuln_id=seed_data["vuln"].id,
+        category="os_vuln", status="open", severity="high",
+    )
+    db.add(other_finding); db.commit()
+    prior = create_decisions(db, [other_finding.id], "accept_risk",
+                             "Historical accept for another host, patched since.",
+                             actor="admin1", approver="executive1", scope="vuln")[0]
+    decide(db, prior.id, True, "executive1")
+    # An open ticket linked to our finding
+    t = Ticket(external_id="VULN-99", summary="patch work", created_by="admin1",
+               status="open", provider="manual")
+    db.add(t); db.flush()
+    db.add(TicketFinding(ticket_id=t.id, finding_id=seed_data["finding"].id))
+    db.commit()
+
+    r = client.get(f"/api/decide/context?finding_ids={seed_data['finding'].id}").json()
+    assert r["finding_count"] == 1
+    assert r["asset_count"] == 1
+    assert r["unique_vulns"] == 1
+    assert len(r["prior_decisions_on_scope"]) >= 0  # prior is at vuln scope -> covers our finding too
+    assert len(r["peer_decisions_on_cve"]) + len(r["prior_decisions_on_scope"]) >= 1
+    assert any(tt["external_id"] == "VULN-99" for tt in r["related_tickets"])
+    assert r["suggested_expiry_days"] > 0
+
+
+def test_decision_templates_crud_and_seed(client, db):
+    # Trigger lifespan to seed defaults (the client fixture already does this).
+    r = client.get("/api/decision-templates").json()
+    assert len(r) >= 5           # several defaults seeded
+    seeded = [t for t in r if t["created_by"] == "system"]
+    assert len(seeded) >= 5
+    assert any(t["disposition"] == "accept_risk" and t["expiry_days"] for t in seeded)
+
+    created = client.post("/api/decision-templates", json={
+        "name": "Test template", "disposition": "false_positive", "scope": "vuln",
+        "justification_text": "Test template used for acceptance testing of the templates API.",
+        "expiry_days": 30,
+    }).json()
+    assert created["id"]
+    client.put(f"/api/decision-templates/{created['id']}",
+               json={"description": "edited", "enabled": False})
+    r2 = client.get("/api/decision-templates").json()
+    [edited] = [t for t in r2 if t["id"] == created["id"]]
+    assert edited["description"] == "edited" and edited["enabled"] is False
+    client.delete(f"/api/decision-templates/{created['id']}")
+    r3 = client.get("/api/decision-templates").json()
+    assert not any(t["id"] == created["id"] for t in r3)
+
+
+def test_decision_templates_require_core_fields(client, db):
+    r = client.post("/api/decision-templates", json={"name": "", "disposition": "accept_risk"})
+    assert r.status_code == 422
+
+
 # --- lifecycle status handling -------------------------------------------------
 
 # --- grouped search ---------------------------------------------------------

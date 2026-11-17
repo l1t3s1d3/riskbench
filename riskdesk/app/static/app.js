@@ -18,7 +18,7 @@ const state = {
   results: null,
   selected: new Set(),
   allMatchingIds: null,     // set when "select all matching" is used
-  register: { state: '', q: '', due: false },
+  register: { state: '', q: '', due: false, mine: false, selected: new Set() },
   decideDraft: null,
 };
 
@@ -168,6 +168,14 @@ async function boot() {
     $('regDue').classList.toggle('is-active', state.register.due);
     loadRegister();
   };
+  $('regMine').onchange = () => {
+    state.register.mine = $('regMine').checked;
+    state.register.selected.clear();
+    loadRegister();
+  };
+  $('regBulkApprove').onclick = () => bulkDecide(true);
+  $('regBulkReject').onclick = () => bulkDecide(false);
+  $('regBulkClear').onclick = () => { state.register.selected.clear(); loadRegister(); };
 
   await loadFindings();
 }
@@ -892,15 +900,66 @@ function showProblems(e) {
 
 // ---------------------------------------------------------------- decide
 
-async function openDecide(findingIds) {
+async function openDecide(findingIds, suggested) {
   const el = $('decide');
   $('detail').hidden = true;
   openDrawer(el);
+  const sug = suggested || {};
   state.decideDraft = {
-    ids: findingIds, disposition: null, scope: 'finding',
-    justification: '', approver: '', expires: '', adjusted_severity: '',
+    ids: findingIds,
+    disposition: sug.disposition || null,
+    scope: sug.scope || 'finding',
+    justification: '', approver: '', expires: '',
+    adjusted_severity: sug.adjusted_severity || '',
     assigned_to: '', remediation_due: '', compensating: '',
+    _context: null, _templates: null,
   };
+  renderDecide();
+  previewScope();
+  loadDecideContext(findingIds);
+  loadDecideTemplates();
+}
+
+async function loadDecideContext(ids) {
+  const p = new URLSearchParams();
+  ids.slice(0, 2000).forEach((i) => p.append('finding_ids', i));
+  try {
+    const ctx = await api(`/api/decide/context?${p}`);
+    state.decideDraft._context = ctx;
+    // Pre-fill suggested expiry if the user hasn't typed one yet
+    if (!state.decideDraft.expires && ctx.suggested_expiry_days) {
+      const date = new Date(Date.now() + ctx.suggested_expiry_days * 86400000);
+      state.decideDraft.expires = date.toISOString().slice(0, 10);
+    }
+    renderDecide();
+  } catch (e) { /* context is optional */ }
+}
+
+async function loadDecideTemplates() {
+  try {
+    const templates = await api('/api/decision-templates?enabled_only=true');
+    state.decideDraft._templates = templates;
+    renderDecide();
+  } catch (e) { /* templates optional */ }
+}
+
+function applyDecideTemplate(tId) {
+  const t = (state.decideDraft._templates || []).find((x) => x.id === Number(tId));
+  if (!t) return;
+  const d = state.decideDraft;
+  d.disposition = t.disposition;
+  d.scope = t.scope || d.scope;
+  d.justification = t.justification_text || '';
+  d.compensating = t.compensating_controls || '';
+  d.adjusted_severity = t.adjusted_severity || '';
+  if (t.expiry_days) {
+    const date = new Date(Date.now() + t.expiry_days * 86400000);
+    d.expires = date.toISOString().slice(0, 10);
+  }
+  if (t.remediation_days) {
+    const date = new Date(Date.now() + t.remediation_days * 86400000);
+    d.remediation_due = date.toISOString().slice(0, 10);
+  }
   renderDecide();
   previewScope();
 }
@@ -923,6 +982,10 @@ function renderDecide(problems) {
     </div>
     <div class="drawer-body">
       ${problems ? `<div class="problems"><ul>${problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
+
+      ${renderDecideContext(d._context)}
+
+      ${renderDecideTemplatePicker(d._templates)}
 
       <div class="sec">
         <h3>Disposition</h3>
@@ -1020,6 +1083,8 @@ function renderDecide(problems) {
       </div>
     </div>`;
 
+  const tplEl = $('decideTemplate');
+  if (tplEl) tplEl.onchange = (e) => { if (e.target.value) applyDecideTemplate(e.target.value); };
   $('dispGrid').onclick = (e) => {
     const b = e.target.closest('.disp');
     if (!b) return;
@@ -1054,6 +1119,90 @@ async function suggestDefaults() {
   }
   renderDecide();
   previewScope();
+}
+
+function renderDecideTemplatePicker(templates) {
+  if (!templates || !templates.length) return '';
+  return `<div class="sec" style="padding-top:8px">
+    <h3 style="margin-bottom:6px">Start from a template</h3>
+    <select id="decideTemplate" class="field" style="max-width:420px">
+      <option value="">— Blank decision —</option>
+      ${templates.map((t) => `<option value="${t.id}">${esc(t.name)} · ${esc(t.disposition.replace('_', ' '))}${
+        t.expiry_days ? ` · ${t.expiry_days}d expiry` : ''
+      }</option>`).join('')}
+    </select>
+    <div class="hint" style="margin-top:4px">Templates pre-fill disposition, scope, justification, expiry, and compensating controls. Edit anything you need to.</div>
+  </div>`;
+}
+
+function renderDecideContext(ctx) {
+  if (!ctx) return '<div class="sec"><div class="hint">Loading context…</div></div>';
+  const vc = ctx.vuln_context, ac = ctx.asset_context;
+  const kev = vc.kev_count ? `<span class="tag tag-kev">KEV ${vc.kev_count} of ${ctx.unique_vulns}</span>` : '';
+  const epss = vc.max_epss !== null ? `<span class="tag">max EPSS ${(vc.max_epss * 100).toFixed(0)}%</span>` : '';
+  const cvss = vc.max_cvss !== null ? `<span class="tag">max CVSS ${vc.max_cvss}</span>` : '';
+  const fix = vc.fix_available_count ? `<span class="tag">fix in ${vc.fix_available_count}/${ctx.finding_count}</span>` : '';
+  const envs = Object.entries(ac.environments).map(([k, v]) =>
+    `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+  const owners = Object.entries(ac.owners).slice(0, 5).map(([k, v]) =>
+    `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+  const bus = Object.entries(ac.business_units).slice(0, 5).map(([k, v]) =>
+    `<span class="tag">${esc(k)}: ${v}</span>`).join(' ');
+  const inet = ac.internet_facing;
+  const inetChip = (inet.true || inet.false)
+    ? `<span class="tag${inet.true ? ' tag-overdue' : ''}">internet-facing: ${inet.true} yes / ${inet.false} no / ${inet.unknown} unk</span>`
+    : '';
+
+  const priorHtml = ctx.prior_decisions_on_scope.length
+    ? `<details open style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">Prior decisions on this scope (${ctx.prior_decisions_on_scope.length})</summary>
+       ${ctx.prior_decisions_on_scope.slice(0, 8).map(priorAdjHtml).join('')}</details>`
+    : '';
+  const peerHtml = ctx.peer_decisions_on_cve.length
+    ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">Peer decisions on the same CVE (${ctx.peer_decisions_on_cve.length})</summary>
+       ${ctx.peer_decisions_on_cve.slice(0, 8).map(priorAdjHtml).join('')}</details>`
+    : '';
+  const ticketsHtml = ctx.related_tickets.length
+    ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">Related tickets (${ctx.related_tickets.length})</summary>
+       ${ctx.related_tickets.slice(0, 10).map((t) => `
+         <div class="ledger-row"><div>
+           ${t.external_url ? `<a href="${esc(t.external_url)}" target="_blank">${esc(t.external_id)}</a>` : esc(t.external_id)}
+           <small>${esc(t.summary || '')}</small>
+         </div><div class="ledger-pts">${esc(t.status)}</div></div>`).join('')}</details>`
+    : '';
+
+  const empty = !priorHtml && !peerHtml && !ticketsHtml;
+
+  return `<div class="sec" style="border-left:3px solid var(--ink);padding-left:12px">
+    <h3 style="margin-bottom:6px">Context</h3>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">
+      ${kev} ${epss} ${cvss} ${fix}
+    </div>
+    <div style="font-size:12px;margin-bottom:4px"><b>Spans</b>: ${ctx.finding_count} findings on ${ctx.asset_count} assets, ${ctx.unique_vulns} unique CVE${ctx.unique_vulns === 1 ? '' : 's'}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px">${envs} ${inetChip}</div>
+    ${owners ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px"><span class="hint" style="font-size:11px">owners:</span>${owners}</div>` : ''}
+    ${bus ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:4px"><span class="hint" style="font-size:11px">business units:</span>${bus}</div>` : ''}
+    ${empty ? '<div class="hint" style="font-size:12px;margin-top:6px">No prior decisions, peer decisions, or tickets on record for this scope.</div>' : ''}
+    ${priorHtml}
+    ${peerHtml}
+    ${ticketsHtml}
+    ${ctx.suggested_expiry_days ? `<div class="hint" style="font-size:11px;margin-top:8px">Policy suggests an expiry of ${ctx.suggested_expiry_days} days for the worst severity in scope${vc.kev_count ? ' (KEV-aware)' : ''}.</div>` : ''}
+  </div>`;
+}
+
+function priorAdjHtml(a) {
+  const stateColor = a.state === 'approved' ? 'var(--success, var(--ink))'
+                    : a.state === 'pending_approval' ? 'var(--notice)'
+                    : 'var(--slate)';
+  return `<div class="ledger-row" style="padding:4px 0">
+    <div style="font-size:12px">
+      <b>${esc(dispLabel(a.disposition))}</b>
+      <span style="color:${stateColor}"> · ${esc(a.state.replace('_', ' '))}</span>
+      ${a.adjusted_severity ? ` · → ${esc(a.adjusted_severity)}` : ''}
+      <small>${esc(a.scope_type)}: ${esc(a.scope_label || a.scope_key)}</small>
+      <small style="color:var(--slate);margin-top:2px">${esc(a.justification.slice(0, 180))}${a.justification.length > 180 ? '…' : ''}</small>
+      <small style="color:var(--slate)">requested by ${esc(a.requested_by)}${a.approved_by ? `, decided by ${esc(a.approved_by)}` : ''}${a.decided_at ? ' on ' + fmtDate(a.decided_at) : ''}${a.expires_at ? ' · expires ' + fmtDate(a.expires_at) : ''}</small>
+    </div>
+  </div>`;
 }
 
 async function previewScope() {
@@ -1111,22 +1260,61 @@ async function submitDecision() {
 // ---------------------------------------------------------------- register
 
 async function loadRegister() {
-  const p = new URLSearchParams();
-  if (state.register.state) p.append('state', state.register.state);
-  if (state.register.q) p.set('q', state.register.q);
-  if (state.register.due) p.set('due_within_days', '30');
-  p.set('page_size', '200');
-  const r = await api(`/api/adjudications?${p}`);
-  if (!r.adjudications.length) {
-    $('registerList').innerHTML = `<div class="empty"><b>No decisions on record yet.</b>
-      Adjudicate findings from the Findings tab and they appear here.</div>`;
+  const sum = $('regQueueSummary');
+  const pendingMode = state.register.state === 'pending_approval';
+  const useQueue = pendingMode && state.register.mine;
+  let decisions = [];
+  let queueMeta = null;
+
+  if (useQueue) {
+    queueMeta = await api('/api/adjudications/queue?approver=me');
+    decisions = queueMeta.decisions;
+  } else {
+    const p = new URLSearchParams();
+    if (state.register.state) p.append('state', state.register.state);
+    if (state.register.q) p.set('q', state.register.q);
+    if (state.register.due) p.set('due_within_days', '30');
+    p.set('page_size', '200');
+    const r = await api(`/api/adjudications?${p}`);
+    decisions = r.adjudications;
+  }
+
+  // Summary line for the queue mode
+  if (useQueue && queueMeta) {
+    const bands = queueMeta.age_bands;
+    sum.innerHTML = `<b>${queueMeta.total}</b> decisions awaiting your approval \u00b7
+      <span style="color:var(--slate)">new ${bands.new} \u00b7 aging ${bands.aging}
+      \u00b7 <b${bands.stale > 0 ? ' style="color:var(--seal)"' : ''}>stale ${bands.stale}</b></span>`;
+  } else if (pendingMode) {
+    sum.innerHTML = `<span class="hint">Tick "Only mine" to see just the decisions you can approve, with bulk actions.</span>`;
+  } else {
+    sum.innerHTML = '';
+  }
+
+  if (!decisions.length) {
+    $('registerList').innerHTML = `<div class="empty"><b>${useQueue ? 'Nothing waiting on you.' : 'No decisions on record yet.'}</b>
+      ${useQueue ? '' : 'Adjudicate findings from the Findings tab and they appear here.'}</div>`;
+    updateBulkBar();
     return;
   }
-  $('registerList').innerHTML = r.adjudications.map((d) => {
+
+  // Keep selection coherent with what's currently shown
+  const shownIds = new Set(decisions.map((d) => d.id));
+  for (const id of [...state.register.selected]) {
+    if (!shownIds.has(id)) state.register.selected.delete(id);
+  }
+
+  $('registerList').innerHTML = decisions.map((d) => {
     const until = daysUntil(d.expires_at);
     const lapsing = until !== null && until <= 30 && d.state === 'approved';
-    return `<div class="row" data-adj="${d.id}" style="grid-template-columns:30px 1fr 190px 150px 130px">
+    const checkable = useQueue && d.can_approve;
+    const checked = state.register.selected.has(d.id);
+    const ageStr = d.age_days !== undefined ? `${d.age_days}d old` : '';
+    return `<div class="row ${checked ? 'is-selected' : ''}" data-adj="${d.id}" style="grid-template-columns:30px 30px 1fr 190px 150px 130px">
       <div class="edge ${d.state === 'approved' ? 'sev-critical' : d.state === 'pending_approval' ? 'sev-medium' : 'sev-low'}"></div>
+      <div class="row-check">${checkable
+        ? `<label class="checkbox"><input type="checkbox" class="reg-check" data-id="${d.id}" ${checked ? 'checked' : ''}><span></span></label>`
+        : ''}</div>
       <div class="row-main">
         <div class="row-id">${esc(dispLabel(d.disposition))}</div>
         <div class="row-title">${esc(d.scope_label || d.scope_key)}</div>
@@ -1135,6 +1323,7 @@ async function loadRegister() {
           <span>${esc(d.scope_type)}</span>
           <span>${d.applied_count} findings at decision</span>
           ${d.adjusted_severity ? `<span>\u2192 ${esc(d.adjusted_severity)}</span>` : ''}
+          ${ageStr ? `<span${d.age_days >= 14 ? ' style="color:var(--seal)"' : ''}>${ageStr}</span>` : ''}
         </div>
       </div>
       <div class="row-asset">${esc(d.requested_by)}
@@ -1150,9 +1339,49 @@ async function loadRegister() {
     </div>`;
   }).join('');
   $('registerList').onclick = (e) => {
+    const cb = e.target.closest('.reg-check');
+    if (cb) {
+      const id = Number(cb.dataset.id);
+      if (cb.checked) state.register.selected.add(id);
+      else state.register.selected.delete(id);
+      updateBulkBar();
+      return;
+    }
     const row = e.target.closest('[data-adj]');
     if (row) openRegisterDetail(Number(row.dataset.adj));
   };
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  const n = state.register.selected.size;
+  $('regBulkBar').hidden = n === 0;
+  $('regBulkCount').textContent = `${n} selected`;
+}
+
+async function bulkDecide(approve) {
+  const ids = [...state.register.selected];
+  if (!ids.length) return;
+  const note = approve
+    ? prompt(`Approving ${ids.length} decision${ids.length === 1 ? '' : 's'}. Optional note:`, '')
+    : prompt(`Rejecting ${ids.length} decision${ids.length === 1 ? '' : 's'}. Reason:`, '');
+  if (note === null) return;    // cancelled
+  if (!approve && !note.trim()) { toast('A rejection needs a reason.', true); return; }
+  try {
+    const r = await api('/api/adjudications/bulk-decide', {
+      method: 'POST',
+      body: JSON.stringify({ adjudication_ids: ids, approve, note }),
+    });
+    toast(`${r.succeeded} ${approve ? 'approved' : 'rejected'}${r.failed ? `, ${r.failed} failed` : ''}`);
+    if (r.failed) {
+      alert('Some decisions could not be processed:\n' +
+            r.results.failed.map((f) => `#${f.id}: ${f.error}`).join('\n'));
+    }
+    state.register.selected.clear();
+    loadRegister();
+  } catch (e) {
+    toast(e.message || 'Bulk decide failed', true);
+  }
 }
 
 async function openRegisterDetail(id) {
@@ -2752,6 +2981,137 @@ loadSources = async function() {
 
 // ---------------------------------------------------------------- settings (tokens + correlation)
 
+async function loadDecisionTemplates() {
+  const el = $('templateList');
+  const templates = await api('/api/decision-templates');
+  _templatesCache = templates;
+  if (!templates.length) {
+    el.innerHTML = '<div class="empty">No templates yet. Create one and it will appear in the Decide drawer.</div>';
+    return;
+  }
+  el.innerHTML = templates.map((t) => `
+    <div class="row" style="grid-template-columns:30px 1fr 180px 120px 120px;cursor:default" data-template="${t.id}">
+      <div class="edge ${t.enabled ? 'sev-high' : 'sev-low'}"></div>
+      <div class="row-main">
+        <div class="row-id">${esc(t.name)}</div>
+        <div class="row-title">${esc(t.description || '')}</div>
+        <div class="row-meta">
+          <span>${esc(t.disposition.replace('_', ' '))}</span>
+          <span>scope: ${esc(t.scope)}</span>
+          ${t.expiry_days ? `<span>${t.expiry_days}d expiry</span>` : ''}
+          ${t.remediation_days ? `<span>${t.remediation_days}d remediation</span>` : ''}
+          ${t.adjusted_severity ? `<span>→ ${esc(t.adjusted_severity)}</span>` : ''}
+        </div>
+      </div>
+      <div class="row-asset">${esc(t.created_by || '')}
+        <small>${t.updated_at ? 'Updated ' + fmtDate(t.updated_at) : ''}</small>
+      </div>
+      <div class="row-asset">${t.enabled ? 'Enabled' : 'Disabled'}</div>
+      <div>
+        <button class="btn-ghost" style="font-size:11px" onclick="openTemplateEditor(${t.id})">Edit</button>
+        <button class="link" style="font-size:11px;color:var(--seal)" onclick="deleteDecisionTemplate(${t.id})">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+function openTemplateEditor(id) {
+  const existing = id ? _templateById(id) : null;
+  const t = existing || {
+    name: '', description: '', disposition: 'accept_risk', scope: 'finding',
+    justification_text: '', compensating_controls: '', adjusted_severity: '',
+    expiry_days: 90, remediation_days: null, enabled: true,
+  };
+  const el = $('detail');
+  openDrawer(el);
+  const meta = state.meta;
+  el.innerHTML = `
+    <div class="drawer-head">
+      <div><h2>${id ? 'Edit' : 'New'} decision template</h2>
+        <p>Pre-filled Decide form</p></div>
+      <button class="x" onclick="closeDrawers()" aria-label="Close">×</button>
+    </div>
+    <div class="drawer-body">
+      <div class="field-group"><label>Name</label>
+        <input id="tplName" class="field" value="${esc(t.name)}"></div>
+      <div class="field-group"><label>Description</label>
+        <input id="tplDesc" class="field" value="${esc(t.description || '')}"></div>
+      <div class="field-row">
+        <div class="field-group" style="flex:1"><label>Disposition</label>
+          <select id="tplDisp" class="field">
+            ${meta.dispositions.map((d) => `<option value="${d.value}"${t.disposition === d.value ? ' selected' : ''}>${esc(d.label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group" style="flex:1"><label>Default scope</label>
+          <select id="tplScope" class="field">
+            ${meta.scopes.map((s) => `<option value="${s.value}"${t.scope === s.value ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="field-group"><label>Justification template</label>
+        <textarea id="tplJust" class="field" style="min-height:120px">${esc(t.justification_text)}</textarea>
+        <div class="hint">What the reviewer sees pre-filled. Edit freely per decision.</div></div>
+      <div class="field-group"><label>Compensating controls</label>
+        <textarea id="tplComp" class="field" style="min-height:60px">${esc(t.compensating_controls || '')}</textarea></div>
+      <div class="field-row">
+        <div class="field-group" style="flex:1"><label>Expiry (days, risk decisions)</label>
+          <input id="tplExp" class="field" type="number" value="${t.expiry_days || ''}"></div>
+        <div class="field-group" style="flex:1"><label>Remediation due (days, routing)</label>
+          <input id="tplRem" class="field" type="number" value="${t.remediation_days || ''}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field-group" style="flex:1"><label>Adjusted severity (adjust_risk only)</label>
+          <select id="tplSev" class="field">
+            <option value="">— none —</option>
+            ${SEV_ORDER.map((s) => `<option value="${s}"${t.adjusted_severity === s ? ' selected' : ''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field-group" style="flex:1"><label><input type="checkbox" id="tplEnabled" ${t.enabled ? 'checked' : ''}> Enabled</label></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn btn-seal" onclick="saveTemplate(${id || 'null'})">${id ? 'Save' : 'Create'}</button>
+        <button class="btn-ghost" onclick="closeDrawers()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+let _templatesCache = [];
+function _templateById(id) {
+  return _templatesCache.find((t) => t.id === id);
+}
+
+async function saveTemplate(id) {
+  const body = {
+    name: $('tplName').value.trim(),
+    description: $('tplDesc').value.trim() || null,
+    disposition: $('tplDisp').value,
+    scope: $('tplScope').value,
+    justification_text: $('tplJust').value.trim(),
+    compensating_controls: $('tplComp').value.trim() || null,
+    adjusted_severity: $('tplSev').value || null,
+    expiry_days: $('tplExp').value ? parseInt($('tplExp').value) : null,
+    remediation_days: $('tplRem').value ? parseInt($('tplRem').value) : null,
+    enabled: $('tplEnabled').checked,
+  };
+  if (!body.name || !body.justification_text) {
+    toast('Name and justification are required', true);
+    return;
+  }
+  try {
+    if (id) await api(`/api/decision-templates/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+    else await api('/api/decision-templates', { method: 'POST', body: JSON.stringify(body) });
+    toast('Template saved');
+    closeDrawers();
+    loadDecisionTemplates();
+  } catch (e) { toast(e.message || 'Save failed', true); }
+}
+
+async function deleteDecisionTemplate(id) {
+  if (!confirm('Delete this template?')) return;
+  await api(`/api/decision-templates/${id}`, { method: 'DELETE' });
+  toast('Template deleted');
+  loadDecisionTemplates();
+}
+
 async function loadSettings() {
   // Tokens
   const tokens = await api('/api/tokens');
@@ -2772,6 +3132,10 @@ async function loadSettings() {
     </div>`).join('') : '<div class="empty">No API tokens. Create one for CI pipelines or scripts.</div>';
 
   $('newToken').onclick = createApiToken;
+
+  // Decision templates
+  loadDecisionTemplates();
+  $('newTemplate').onclick = () => openTemplateEditor(null);
 
   // Correlation
   try {
