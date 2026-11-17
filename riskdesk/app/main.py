@@ -39,6 +39,8 @@ async def lifespan(app: FastAPI):
     try:
         seed_default_users(db)
         cc_service.apply_all_from_db(db)
+        from .decision_templates import seed_defaults as seed_decision_templates
+        seed_decision_templates(db)
         n = adj_service.expire_lapsed(db)
         if n:
             logging.info("Expired %d lapsed decisions on startup", n)

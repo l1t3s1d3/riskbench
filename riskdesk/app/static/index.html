@@ -136,10 +136,20 @@
         </div>
       </div>
       <div class="toolbar-right">
+        <label class="micro" for="regMine" style="display:flex;align-items:center;gap:4px">
+          <input type="checkbox" id="regMine"> Only mine
+        </label>
         <input id="regSearch" type="search" class="field-sm mono" placeholder="Search decisions">
         <button id="regDue" class="btn-ghost">Due within 30 days</button>
         <a class="btn-ghost" href="/api/export/register.csv">Export register</a>
       </div>
+    </div>
+    <div id="regQueueSummary" style="padding:0 18px 4px;font-size:12px;color:var(--slate)"></div>
+    <div id="regBulkBar" hidden style="padding:8px 18px;background:var(--seal-wash);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      <span id="regBulkCount" style="font-weight:600"></span>
+      <button class="btn btn-seal" id="regBulkApprove">Approve selected</button>
+      <button class="btn-ghost" id="regBulkReject">Reject selected</button>
+      <button class="link" id="regBulkClear" style="margin-left:auto">Clear</button>
     </div>
     <div id="registerList" class="rows"></div>
   </section>
@@ -530,6 +540,14 @@
       <div class="toolbar-right"><button id="newToken" class="btn">Create token</button></div>
     </div>
     <div id="tokenList" class="rows" style="max-height:300px;overflow-y:auto"></div>
+
+    <div class="toolbar"><div class="toolbar-left"><span class="count">Decision templates</span></div>
+      <div class="toolbar-right">
+        <button id="newTemplate" class="btn">New template</button>
+      </div>
+    </div>
+    <div style="padding:0 18px 4px"><span class="hint">Pre-filled Decide form presets. Pick one in the Decide drawer to fill in disposition, scope, justification, expiry, and compensating controls in one click.</span></div>
+    <div id="templateList" class="rows" style="max-height:400px;overflow-y:auto"></div>
 
     <div class="toolbar"><div class="toolbar-left"><span class="count">Asset correlation</span></div>
       <div class="toolbar-right">
