@@ -481,3 +481,35 @@ textarea.field { min-height: 96px; resize: vertical; line-height: 1.5; }
   font-size: 11px; font-weight: 600; color: #fff;
   background: #c0392b; padding: 1px 6px; border-radius: 10px;
 }
+
+/* Scope-promotion hint shown under the bulk-select bar. */
+.scope-hint {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 18px; border-bottom: 1px solid var(--rule-soft);
+  background: var(--row-alt);
+  font-size: 13px;
+}
+.scope-hint-icon {
+  display: inline-flex; width: 20px; height: 20px; border-radius: 50%;
+  background: var(--seal); color: #fff; align-items: center; justify-content: center;
+  font-weight: 700;
+}
+.scope-warn {
+  color: #c0392b; font-weight: 600; cursor: help;
+  margin-left: 4px; font-size: 12px;
+}
+.scope-panel {
+  padding: 10px 18px; border-bottom: 1px solid var(--rule-soft);
+  background: var(--row-alt);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.scope-option {
+  padding: 10px; border: 1px solid var(--rule-soft); border-radius: 6px;
+  background: var(--panel); display: flex; flex-direction: column; gap: 6px;
+}
+.scope-option-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag-ok { background: #2e7d32; color: #fff; }
+.tag-warn { background: #c0392b; color: #fff; }
+.scope-warn-list {
+  margin: 4px 0 0 18px; padding: 0; color: var(--text-dim); font-size: 12px;
+}

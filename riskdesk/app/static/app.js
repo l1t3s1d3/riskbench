@@ -499,11 +499,14 @@ function renderFindings() {
     $('selectAllText').innerHTML = state.allMatchingIds
       ? `All <b>${r.total.toLocaleString()}</b> matching findings are selected.`
       : `<b>${state.selected.size}</b> selected on this page.`;
-    $('selectAllMatching').hidden = !!state.allMatchingIds || r.total <= state.selected.size;
+    $('selectAllMatching').hidden = !!state.allMatchingIds || r.total <= state.results.total;
     bar.insertAdjacentElement('beforeend', decideButton());
     bar.insertAdjacentElement('beforeend', ticketButton());
+    renderScopePromotion();
   } else {
     bar.hidden = true;
+    const hint = document.getElementById('scopePromotionHint');
+    if (hint) hint.remove();
   }
 
   if (!r.findings.length) {
@@ -540,6 +543,98 @@ function decideButton() {
   b.textContent = `Record a decision on ${(state.allMatchingIds ? state.results.total : state.selected.size).toLocaleString()} findings`;
   b.onclick = () => openDecide([...(state.allMatchingIds || state.selected)]);
   return b;
+}
+
+async function renderScopePromotion() {
+  const ids = [...(state.allMatchingIds || state.selected)];
+  if (ids.length < 2) {
+    const h = document.getElementById('scopePromotionHint');
+    if (h) h.remove();
+    return;
+  }
+  // Mount a hint block just under the select-all bar so it reads as a tip,
+  // not a separate action. Keep it quiet when nothing useful is found.
+  const bar = $('selectAllBar');
+  let host = document.getElementById('scopePromotionHint');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'scopePromotionHint';
+    host.className = 'scope-hint';
+    bar.insertAdjacentElement('afterend', host);
+  }
+  host.innerHTML = '<span class="hint">Checking for broader scope…</span>';
+
+  let data;
+  try {
+    data = await api('/api/review/scope-promotion', {
+      method: 'POST', body: JSON.stringify({ finding_ids: ids.slice(0, 5000) }),
+    });
+  } catch (e) {
+    host.remove();
+    return;
+  }
+
+  const best = (data.suggestions || []).find(
+    (s) => s.scope_type !== 'finding' && s.key_count < ids.length
+  );
+  if (!best) {
+    host.remove();
+    return;
+  }
+  const warn = best.warnings.length ? ` <span class="scope-warn" title="${esc(best.warnings.join('\n'))}">${best.warnings.length} warning${best.warnings.length > 1 ? 's' : ''}</span>` : '';
+  const extras = best.extra_beyond_selection
+    ? ` <span class="hint">(+${best.extra_beyond_selection.toLocaleString()} other open findings covered)</span>` : '';
+  host.innerHTML = `
+    <span class="scope-hint-icon">↗</span>
+    <span>${esc(best.summary)}${warn}${extras}</span>
+    <button class="btn-ghost" id="scopePromoteApply" style="margin-left:auto">Use this scope</button>
+    <button class="btn-ghost" id="scopePromoteShow" style="margin-left:6px">Show options</button>
+  `;
+  document.getElementById('scopePromoteApply').onclick = () => {
+    openDecideWithScope(ids, best.scope_type);
+  };
+  document.getElementById('scopePromoteShow').onclick = () => {
+    showScopePromotionOptions(ids, data.suggestions);
+  };
+}
+
+function openDecideWithScope(ids, scopeType) {
+  // openDecide's `suggested` arg seeds the draft; we route the promoted
+  // scope through there rather than mutating state ourselves.
+  openDecide(ids, { scope: scopeType });
+}
+
+function showScopePromotionOptions(ids, suggestions) {
+  const host = document.getElementById('scopePromotionHint');
+  if (!host) return;
+  // Toggle an expanded options panel inline rather than open a modal.
+  let panel = document.getElementById('scopePromotionPanel');
+  if (panel) { panel.remove(); return; }
+  panel = document.createElement('div');
+  panel.id = 'scopePromotionPanel';
+  panel.className = 'scope-panel';
+  panel.innerHTML = suggestions.map((s) => {
+    const warns = s.warnings.length
+      ? `<ul class="scope-warn-list">${s.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>`
+      : '';
+    const badge = s.clean ? '<span class="tag tag-ok">clean</span>' : '<span class="tag tag-warn">has extras</span>';
+    const extras = s.extra_beyond_selection
+      ? ` <span class="hint">+${s.extra_beyond_selection.toLocaleString()} beyond selection</span>` : '';
+    return `<div class="scope-option">
+      <div class="scope-option-head">
+        <b>${esc(s.summary)}</b> ${badge}${extras}
+      </div>
+      ${warns}
+      <button class="btn btn-seal" data-scope-apply="${s.scope_type}">Use ${esc(s.scope_type)} scope</button>
+    </div>`;
+  }).join('');
+  host.insertAdjacentElement('afterend', panel);
+  panel.querySelectorAll('[data-scope-apply]').forEach((b) => {
+    b.onclick = () => {
+      panel.remove();
+      openDecideWithScope(ids, b.dataset.scopeApply);
+    };
+  });
 }
 
 function ticketButton() {

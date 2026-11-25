@@ -445,6 +445,21 @@ def review_suggest(scope_type: str, scope_key: str, db=Depends(get_session)):
     return {"suggested": suggest_for_scope(db, scope_type, scope_key)}
 
 
+@router.post("/review/scope-promotion")
+def review_scope_promotion(body: dict = Body(...), db=Depends(get_session)):
+    """Given a selection of finding IDs, suggest broader scopes the
+    reviewer could record the decision at. Each suggestion reports the
+    number of distinct scope keys, total coverage, extras beyond the
+    selection, and warnings when promotion sweeps in heterogeneous
+    siblings.
+
+    Body: `{"finding_ids": [1, 2, 3, ...]}` (or `{"ids": [...]}`).
+    """
+    from ..scope_promotion import suggest_scope_promotions
+    ids = body.get("finding_ids") or body.get("ids") or []
+    return suggest_scope_promotions(db, ids)
+
+
 @router.get("/audit", response_model=AuditPageOut)
 def audit(limit: int = 100, cursor: int | None = None,
           action: list[str] = Query(default=[]),
