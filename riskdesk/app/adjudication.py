@@ -216,6 +216,13 @@ def create_decisions(
         ))
         created.append(adj)
 
+    # Human decisions supersede any auto routine-fix tags on the same findings.
+    # Retire by scope so a vuln-scope decision clears routine tags on every
+    # finding that scope covers, not only the ones explicitly selected.
+    from .routine_fix import retire_for_scope
+    for adj in created:
+        retire_for_scope(db, adj.scope_type, adj.scope_key, actor=actor)
+
     db.commit()
     invalidate_cache()
     _mark_rollup_stale(db)

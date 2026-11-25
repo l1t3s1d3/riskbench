@@ -381,7 +381,7 @@ def serialize_finding(f: Finding, risk, adj: Adjudication | None) -> dict:
         },
         "decision": _serialize_adj(adj) if adj else None,
         "has_pending": risk.has_pending,
-        "is_demo": bool((f.raw or {}).get("demo")),
+        "is_demo": bool(f.is_demo or (f.raw or {}).get("demo")),
     }
 
 

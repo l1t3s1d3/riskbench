@@ -60,7 +60,8 @@ function toast(message, isError) {
 
 const DISP_SHORT = {
   fix_immediately: 'Fix now', complex_resolution: 'Complex', developer_review: 'Dev review',
-  accept_risk: 'Accepted', adjust_risk: 'Adjusted', false_positive: 'Not affected',
+  routine_fix: 'Routine', accept_risk: 'Accepted', adjust_risk: 'Adjusted',
+  false_positive: 'Not affected',
 };
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const STATUS_ORDER = ['open', 'fixed', 'stale', 'verified_fixed', 'suppressed_at_source'];

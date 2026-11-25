@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
+from .compression import CompressedJSON
 from .db import Base
 
 
@@ -155,7 +156,8 @@ class Finding(Base):
     verified_at = Column(DateTime, nullable=True)
 
     source_url = Column(String(1024))
-    raw = Column(JSON, default=dict)        # untouched source payload
+    raw = Column(CompressedJSON, default=dict)   # untouched source payload (auto-gzipped above 512 B)
+    is_demo = Column(Boolean, default=False, nullable=False, index=True)
 
     asset = relationship("Asset", back_populates="findings")
     vuln = relationship("Vuln", back_populates="findings")
@@ -206,7 +208,7 @@ class Adjudication(Base):
     scope_label = Column(String(512))       # human-readable, for the register
     # Snapshot of the filter used when this was created in bulk, so the basis of
     # the decision is reconstructable later.
-    scope_filter = Column(JSON, nullable=True)
+    scope_filter = Column(CompressedJSON, nullable=True)
 
     disposition = Column(String(32), nullable=False, index=True)
     state = Column(String(32), nullable=False, default="draft", index=True)
@@ -285,7 +287,7 @@ class AuditEvent(Base):
     entity_type = Column(String(32), index=True)
     entity_id = Column(String(64), index=True)
     summary = Column(String(1024))
-    detail = Column(JSON, default=dict)
+    detail = Column(CompressedJSON, default=dict)
 
 
 class SyncRun(Base):
@@ -302,7 +304,7 @@ class SyncRun(Base):
     error = Column(Text)
     triggered_by = Column(String(256))
     # Delta summary written by the sync engine for the review surface.
-    delta = Column(JSON, default=dict)
+    delta = Column(CompressedJSON, default=dict)
 
 
 class DashboardRollup(Base):

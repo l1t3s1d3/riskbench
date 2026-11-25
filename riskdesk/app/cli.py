@@ -94,7 +94,7 @@ def cmd_reset(args):
     db = SessionLocal()
     try:
         if args.demo_only:
-            rows = db.query(Finding).filter(Finding.raw.contains('"demo": true')).all()
+            rows = db.query(Finding).filter(Finding.is_demo.is_(True)).all()
             ids = [r.id for r in rows]
             if not ids:
                 print("No demo rows found.")

@@ -402,3 +402,36 @@ def list_pipeline_containers(request: Request):
 @router.post("/pipeline/containers/{service}/{action}")
 def manage_pipeline_container(service: str, action: str, request: Request):
     return pipeline_service.manage_container(action, service)
+
+
+# --- storage ----------------------------------------------------------------
+
+@router.get("/storage/stats")
+def storage_stats_endpoint(db=Depends(get_session)):
+    """Per-column compression stats and SQLite file size."""
+    from .. import storage as storage_service
+    return storage_service.storage_stats(db)
+
+
+@router.post("/storage/compress")
+def storage_compress_endpoint(
+    request: Request,
+    body: dict = Body(default_factory=dict),
+    db=Depends(get_session),
+):
+    """Backfill compression on existing rows, then optionally VACUUM.
+    Pass `{"vacuum": true}` to also reclaim free pages (SQLite)."""
+    from .. import storage as storage_service
+    actor = current_user(request)
+    report = storage_service.compress_backfill(db)
+    did_vacuum = None
+    if body.get("vacuum"):
+        did_vacuum = storage_service.vacuum(db)
+    db.add(AuditEvent(
+        actor=actor, action="storage.compress",
+        entity_type="system", entity_id="storage",
+        summary="Storage compression backfill" + (" + VACUUM" if did_vacuum else ""),
+        detail={"backfill": report, "vacuum": did_vacuum},
+    ))
+    db.commit()
+    return {"backfill": report, "vacuum": did_vacuum}

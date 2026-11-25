@@ -75,8 +75,7 @@ def _filter_from_query(
 @router.get("/meta", response_model=MetaOut)
 def meta(request: Request, db=Depends(get_session)):
     demo_rows = db.execute(
-        select(func.count()).select_from(Finding)
-        .where(Finding.raw.contains('"demo": true'))
+        select(func.count()).select_from(Finding).where(Finding.is_demo.is_(True))
     ).scalar() or 0
     return {
         "org": settings.org_name,
