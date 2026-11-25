@@ -16,6 +16,7 @@ import datetime as dt
 
 from sqlalchemy import func, select
 
+from .buckets import BUCKETS, bucket_for_finding
 from .enums import Disposition
 from .models import (
     Adjudication, Asset, DashboardRollup, Finding, SyncRun, Vuln,
@@ -62,6 +63,8 @@ def _compute(db, now: dt.datetime) -> dict:
     by_severity: dict[str, int] = {}
     by_source: dict[str, int] = {}
     by_disposition: dict[str, int] = {}
+    by_bucket: dict[str, int] = {str(b.number): 0 for b in BUCKETS}
+    bucket_aging_breach: dict[str, int] = {str(b.number): 0 for b in BUCKETS if b.max_days}
     overdue = 0
     kev_open = 0
 
@@ -74,6 +77,19 @@ def _compute(db, now: dt.datetime) -> dict:
         by_severity[eff] = by_severity.get(eff, 0) + 1
         by_source[source] = by_source.get(source, 0) + 1
         by_disposition[disp] = by_disposition.get(disp, 0) + 1
+        bucket_num = bucket_for_finding(adj, now)
+        by_bucket[str(bucket_num)] = by_bucket.get(str(bucket_num), 0) + 1
+        # Aging breach: bucket 0 anchors on first_detected; bucket 3 on
+        # when the governing decision landed (decided_at or requested_at).
+        max_days = next((b.max_days for b in BUCKETS if b.number == bucket_num), None)
+        if max_days:
+            anchor = first_detected
+            if bucket_num != 0 and adj is not None:
+                anchor = adj.decided_at or adj.requested_at or first_detected
+            if _age_days(anchor, now) > max_days:
+                bucket_aging_breach[str(bucket_num)] = (
+                    bucket_aging_breach.get(str(bucket_num), 0) + 1
+                )
         if kev:
             kev_open += 1
         if sla_status(first_detected, eff, bool(kev), adj, now)[1]:
@@ -89,10 +105,20 @@ def _compute(db, now: dt.datetime) -> dict:
         "by_severity": by_severity,
         "by_source": by_source,
         "by_disposition": by_disposition,
+        "by_bucket": by_bucket,
+        "bucket_aging_breach": bucket_aging_breach,
         "overdue": overdue,
         "kev_open": kev_open,
-        "undecided": by_disposition.get("none", 0),
+        "undecided": by_bucket.get("0", 0),
     }
+
+
+def _age_days(anchor: dt.datetime | None, now: dt.datetime) -> float:
+    if anchor is None:
+        return 0.0
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=dt.timezone.utc)
+    return max(0.0, (now - anchor).total_seconds() / 86400.0)
 
 
 def get_rollup(db, now: dt.datetime | None = None) -> dict:

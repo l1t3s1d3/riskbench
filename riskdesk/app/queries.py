@@ -33,6 +33,7 @@ class FindingFilter:
     categories: list[str] = field(default_factory=list)
     dispositions: list[str] = field(default_factory=list)   # "none" for undecided
     priorities: list[str] = field(default_factory=list)
+    buckets: list[int] = field(default_factory=list)        # 0..4, filters by bucket
     kev_only: bool = False
     fixable_only: bool = False
     overdue_only: bool = False
@@ -241,6 +242,10 @@ def search(db, f: FindingFilter, page: int = 1, page_size: int = 50) -> dict:
                 continue
             if disp is not None and disp not in f.dispositions:
                 continue
+        if f.buckets:
+            from .buckets import bucket_for_finding
+            if bucket_for_finding(adj, now) not in f.buckets:
+                continue
 
         # Lightweight priority proxy for sorting; the page recomputes the real
         # score with the full factor breakdown.
@@ -382,7 +387,15 @@ def serialize_finding(f: Finding, risk, adj: Adjudication | None) -> dict:
         "decision": _serialize_adj(adj) if adj else None,
         "has_pending": risk.has_pending,
         "is_demo": bool(f.is_demo or (f.raw or {}).get("demo")),
+        "bucket": _bucket_number(f, adj),
     }
+
+
+def _bucket_number(f: Finding, adj: Adjudication | None) -> int:
+    from .buckets import bucket_for_finding
+    if f.status != "open":
+        return bucket_for_finding(adj)  # same mapping, callers can ignore closed
+    return bucket_for_finding(adj)
 
 
 def _serialize_adj(a: Adjudication) -> dict:

@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
+from ..buckets import bucket_for_disposition as _bucket_for, bucket_meta as _bucket_meta
 from ..config import settings
 from ..db import get_session
 from ..enums import (
@@ -42,6 +43,7 @@ def _filter_from_query(
     category: list[str] = Query(default=[]),
     disposition: list[str] = Query(default=[]),
     priority: list[str] = Query(default=[]),
+    bucket: list[int] = Query(default=[]),
     kev: bool = False,
     fixable: bool = False,
     overdue: bool = False,
@@ -62,7 +64,7 @@ def _filter_from_query(
 ) -> FindingFilter:
     return FindingFilter(
         sources=source, severities=severity, statuses=status, categories=category,
-        dispositions=disposition, priorities=priority, kev_only=kev,
+        dispositions=disposition, priorities=priority, buckets=bucket, kev_only=kev,
         fixable_only=fixable, overdue_only=overdue, undecided_only=undecided,
         q=q, asset=asset, cve=cve,
         asset_id=asset_id, component=component, component_version=component_version,
@@ -84,9 +86,11 @@ def meta(request: Request, db=Depends(get_session)):
         "current_user": current_user(request),
         "dispositions": [
             {"value": d.value, "label": DISPOSITION_LABELS[d],
-             "is_risk_decision": d.value in {"accept_risk", "adjust_risk", "false_positive"}}
+             "is_risk_decision": d.value in {"accept_risk", "adjust_risk", "false_positive"},
+             "bucket": _bucket_for(d.value)}
             for d in Disposition
         ],
+        "buckets": _bucket_meta(),
         "severities": [s.value for s in Severity],
         "categories": [c.value for c in FindingCategory],
         "scopes": [
@@ -341,6 +345,104 @@ def dashboard(db=Depends(get_session)):
     payload = get_rollup(db, now)
     payload.update(live_extras(db, now))
     return payload
+
+
+# --- bucket reporting & bulk review ----------------------------------------
+
+@router.get("/buckets/report")
+def buckets_report(top_n: int = 10, db=Depends(get_session)):
+    """Per-bucket breakdown: counts, age stats, top CVEs/owners, over-cap items."""
+    from ..buckets_report import bucket_report
+    return bucket_report(db, top_n=top_n)
+
+
+@router.get("/buckets/report.csv")
+def buckets_report_csv(db=Depends(get_session)):
+    """Per-bucket breakdown as CSV for executive reporting."""
+    from ..buckets_report import bucket_report
+    data = bucket_report(db, top_n=0)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["bucket", "title", "count", "kev", "severity_critical",
+                "severity_high", "severity_medium", "severity_low",
+                "median_age_days", "p90_age_days", "max_age_days",
+                "max_days_cap", "over_cap_count"])
+    for b in data["buckets"]:
+        sev = b["severities"]
+        w.writerow([
+            b["number"], b["title"], b["count"], b["kev"],
+            sev.get("critical", 0), sev.get("high", 0),
+            sev.get("medium", 0), sev.get("low", 0),
+            b["age"]["median_days"], b["age"]["p90_days"], b["age"]["max_days"],
+            b["max_days"] or "", b["over_cap_count"],
+        ])
+    buf.seek(0)
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+    return StreamingResponse(
+        iter([buf.read()]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="bucket-report-{stamp}.csv"'},
+    )
+
+
+@router.get("/buckets/trend")
+def buckets_trend(weeks: int = 8, db=Depends(get_session)):
+    """Weekly history of bucket counts."""
+    from ..buckets_report import bucket_trend
+    return bucket_trend(db, weeks=weeks)
+
+
+@router.get("/buckets/{bucket_number}/findings")
+def buckets_findings(bucket_number: int,
+                     page: int = 1, page_size: int = 50,
+                     db=Depends(get_session)):
+    """List findings currently sitting in a given bucket."""
+    from ..buckets import bucket_for_finding, BUCKETS
+    if not any(b.number == bucket_number for b in BUCKETS):
+        from fastapi import HTTPException
+        raise HTTPException(400, f"Unknown bucket {bucket_number}")
+    resolution = build_resolution_map(db)
+    # Load open findings in one query, then filter in Python so bucket
+    # membership stays consistent with the rest of the API.
+    rows = db.execute(
+        select(Finding).options(joinedload(Finding.asset), joinedload(Finding.vuln))
+        .where(Finding.status == "open")
+        .order_by(Finding.first_detected.asc())
+    ).unique().scalars().all()
+    hits = [f for f in rows if bucket_for_finding(resolution.get(f.id)) == bucket_number]
+    total = len(hits)
+    start = (page - 1) * page_size
+    page_items = hits[start:start + page_size]
+    pending = build_pending_map(db)
+    out = []
+    for f in page_items:
+        adj = resolution.get(f.id)
+        risk = compute_risk(f, adj, has_pending=f.id in pending)
+        out.append(serialize_finding(f, risk, adj))
+    return {"bucket": bucket_number, "total": total, "page": page,
+            "page_size": page_size, "findings": out}
+
+
+@router.get("/review/bundles")
+def review_bundles(limit: int = 20, db=Depends(get_session)):
+    """Smart bundles: undecided groups with a suggested disposition."""
+    from ..bulk_review import smart_bundles
+    return {"bundles": smart_bundles(db, limit=limit)}
+
+
+@router.get("/review/intake")
+def review_intake(limit: int = 100, db=Depends(get_session)):
+    """Bucket-0 findings sorted oldest-first, grouped by owner."""
+    from ..bulk_review import intake_queue
+    return intake_queue(db, limit=limit)
+
+
+@router.get("/review/suggest")
+def review_suggest(scope_type: str, scope_key: str, db=Depends(get_session)):
+    """Pre-fill hint for a decision form, pulled from the most recent
+    approved decision at this scope. Returns `{"suggested": null}` when
+    the team has not decided this scope before."""
+    from ..bulk_review import suggest_for_scope
+    return {"suggested": suggest_for_scope(db, scope_type, scope_key)}
 
 
 @router.get("/audit", response_model=AuditPageOut)

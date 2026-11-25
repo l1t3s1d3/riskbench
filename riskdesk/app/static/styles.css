@@ -473,3 +473,11 @@ textarea.field { min-height: 96px; resize: vertical; line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* Adjudication buckets (0-4) tile strip. Matches the policy document. */
+.bucket-stat { position: relative; }
+.bucket-stat b { display: inline-flex; align-items: baseline; gap: 6px; }
+.bucket-breach {
+  font-size: 11px; font-weight: 600; color: #fff;
+  background: #c0392b; padding: 1px 6px; border-radius: 10px;
+}

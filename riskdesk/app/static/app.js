@@ -8,7 +8,7 @@ const state = {
   pageSize: 50,
   filter: {
     status: ['open'], source: [], severity: [], category: [], disposition: [],
-    quick: null, q: '', sort: 'risk',
+    bucket: [], quick: null, q: '', sort: 'risk',
     // Exact-match drill-downs (set by clicking a group row).
     asset_id: null, component: '', component_version: '',
     owner: '', business_unit: '', asset_type: '', asset_group_id: null, ecosystem: '',
@@ -325,6 +325,7 @@ function filterParams() {
   state.filter.severity.forEach((v) => p.append('severity', v));
   state.filter.category.forEach((v) => p.append('category', v));
   state.filter.disposition.forEach((v) => p.append('disposition', v));
+  (state.filter.bucket || []).forEach((v) => p.append('bucket', String(v)));
   if (state.filter.q) p.set('q', state.filter.q);
   if (state.filter.sort) p.set('sort', state.filter.sort);
   // Exact-match drill-down filters from a clicked group row.
@@ -382,10 +383,31 @@ function renderStats(d) {
     ['Awaiting approval', d.pending_approvals.toLocaleString(), '', null],
     ['Lapsing in 30d', d.expiring_30d.toLocaleString(), 'is-notice', null],
   ];
-  $('statStrip').innerHTML = items.map(([label, val, cls, quick]) =>
+  const stats = items.map(([label, val, cls, quick]) =>
     `<div class="stat ${cls} ${quick ? 'is-clickable' : ''}" ${quick ? `data-quick="${quick}"` : ''}>
        <b>${val}</b><span>${label}</span></div>`).join('');
+  const bucketMeta = state.meta?.buckets || [];
+  const breach = d.bucket_aging_breach || {};
+  const buckets = (d.by_bucket)
+    ? bucketMeta.map((b) => {
+        const n = (d.by_bucket[String(b.number)] || 0);
+        const over = breach[String(b.number)] || 0;
+        const notice = over > 0 ? 'is-notice' : '';
+        const tag = over > 0 ? ` <span class="bucket-breach" title="${over} over ${b.max_days}-day cap">${over}!</span>` : '';
+        return `<div class="stat bucket-stat is-clickable ${notice}" data-bucket="${b.number}" title="${esc(b.summary)}">
+          <b>${n.toLocaleString()}${tag}</b><span>B${b.number} · ${esc(b.title)}</span></div>`;
+      }).join('')
+    : '';
+  $('statStrip').innerHTML = stats + buckets;
   $('statStrip').onclick = (e) => {
+    const b = e.target.closest('[data-bucket]');
+    if (b) {
+      state.filter.bucket = [parseInt(b.dataset.bucket, 10)];
+      state.page = 1;
+      state.selected.clear();
+      loadFindings();
+      return;
+    }
     const s = e.target.closest('[data-quick]');
     if (s) applyQuick(s.dataset.quick);
   };
@@ -393,7 +415,7 @@ function renderStats(d) {
 
 function applyQuick(kind) {
   if (kind === 'clear') {
-    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
+    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], bucket: [], quick: null, q: '', sort: state.filter.sort };
     $('qInput').value = '';
   } else {
     state.filter.quick = state.filter.quick === kind ? null : kind;
@@ -739,13 +761,29 @@ function renderActiveDrillDowns() {
       </span>`);
     }
   }
+  if ((state.filter.bucket || []).length) {
+    for (const n of state.filter.bucket) {
+      const meta = (state.meta?.buckets || []).find((b) => b.number === n);
+      const title = meta ? meta.title : `Bucket ${n}`;
+      chips.push(`<span class="tag" style="font-size:11px" data-drill="bucket">
+        bucket: ${n} · ${esc(title)} <a href="#" class="link" style="margin-left:4px" data-clear="bucket">×</a>
+      </span>`);
+    }
+  }
   if (!chips.length) { host.innerHTML = ''; return; }
   host.innerHTML = '<span class="hint" style="font-size:11px">Drilled down:</span>' +
     chips.join('') +
     `<a href="#" class="link" style="font-size:11px" id="clearAllDrills">clear all</a>`;
   host.onclick = (e) => {
     const c = e.target.closest('[data-clear]');
-    if (c) { e.preventDefault(); state.filter[c.dataset.clear] = (c.dataset.clear.endsWith('_id') ? null : ''); state.page = 1; loadFindings(); return; }
+    if (c) {
+      e.preventDefault();
+      const k = c.dataset.clear;
+      state.filter[k] = (k === 'bucket') ? [] : (k.endsWith('_id') ? null : '');
+      state.page = 1;
+      loadFindings();
+      return;
+    }
     if (e.target.id === 'clearAllDrills') {
       e.preventDefault();
       DRILLDOWN_KEYS.forEach((k) => { state.filter[k] = (k.endsWith('_id') ? null : ''); });
@@ -2745,7 +2783,7 @@ function applySavedView(v) {
   state.filter = {
     status: f.status || f.statuses || ['open'],
     source: f.sources || [], severity: f.severities || [], category: f.categories || [],
-    disposition: f.dispositions || [], quick: f.quick || null,
+    disposition: f.dispositions || [], bucket: f.buckets || [], quick: f.quick || null,
     q: f.q || '', sort: f.sort || 'risk',
   };
   $('qInput').value = state.filter.q;
