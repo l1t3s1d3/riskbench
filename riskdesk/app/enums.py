@@ -54,10 +54,13 @@ VERIFIABLE_STATUSES = {FindingStatus.FIXED.value, FindingStatus.STALE.value}
 
 class Disposition(str, Enum):
     """Mirrors the five-disposition adjudication framework, plus a
-    factual-correction disposition that is deliberately NOT a risk decision."""
+    factual-correction disposition that is deliberately NOT a risk decision,
+    and a routine-patch disposition applied by the system to OS findings
+    that are still inside their severity SLA."""
     FIX_IMMEDIATELY = "fix_immediately"
     COMPLEX_RESOLUTION = "complex_resolution"
     DEVELOPER_REVIEW = "developer_review"
+    ROUTINE_FIX = "routine_fix"
     ACCEPT_RISK = "accept_risk"
     ADJUST_RISK = "adjust_risk"
     FALSE_POSITIVE = "false_positive"
@@ -76,12 +79,20 @@ ROUTING_DISPOSITIONS = {
     Disposition.FIX_IMMEDIATELY,
     Disposition.COMPLEX_RESOLUTION,
     Disposition.DEVELOPER_REVIEW,
+    Disposition.ROUTINE_FIX,
+}
+
+# Dispositions the system applies on its own, with no human in the loop.
+# These must stay in ROUTING_DISPOSITIONS so they do not require an approver.
+SYSTEM_DISPOSITIONS = {
+    Disposition.ROUTINE_FIX,
 }
 
 DISPOSITION_LABELS = {
     Disposition.FIX_IMMEDIATELY: "Fix immediately",
     Disposition.COMPLEX_RESOLUTION: "Complex resolution",
     Disposition.DEVELOPER_REVIEW: "Developer review",
+    Disposition.ROUTINE_FIX: "Routine fix",
     Disposition.ACCEPT_RISK: "Accept risk",
     Disposition.ADJUST_RISK: "Adjust risk",
     Disposition.FALSE_POSITIVE: "False positive / not affected",

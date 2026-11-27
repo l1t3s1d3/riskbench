@@ -178,6 +178,21 @@ def run_sync(source: str, demo: bool = False, limit: int | None = None,
             "auto_assigned": assign_stats.get("assigned", 0) if assign_stats else 0,
         }
         _notify_complete(source, result)
+        # A completed sync changes counts, severities, and often decision
+        # coverage. Flush the TTL cache so the next page load sees fresh data.
+        from .cache import invalidate_all
+        invalidate_all()
+        # Absorb new OS findings into the standard patching cadence so the
+        # adjudication queue only shows exceptions. Done before the rollup
+        # rebuild so the first dashboard read reflects the fresh tags.
+        try:
+            from .routine_fix import auto_tag_routine_fixes
+            auto_tag_routine_fixes(db)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("auto_tag_routine_fixes failed: %s", e)
+        from .rollup import mark_stale
+        mark_stale(db)
         db.close()
     return result
 
@@ -300,6 +315,7 @@ def _upsert_finding(db, source: str, rec: NormalizedRecord,
     row.last_synced_at = ctx.started
     row.source_url = rec.source_url
     row.raw = rec.raw
+    row.is_demo = bool((rec.raw or {}).get("demo"))
     db.flush()  # events need row.id
 
     transition = apply_reported_status(
@@ -374,6 +390,10 @@ def run_sync_from_records(caller_db, source: str, records: list[NormalizedRecord
             "error": run.error, **stats,
             "new_by_severity": new_severity,
         }
+        from .cache import invalidate_all
+        invalidate_all()
+        from .rollup import mark_stale
+        mark_stale(db)
         db.close()
     return result
 

@@ -197,6 +197,10 @@ def _closure_age(finding: Finding, closed: dt.datetime) -> str:
 #  Metrics
 # ---------------------------------------------------------------------------
 
+from .cache import cached
+
+
+@cached("lifecycle_metrics")
 def lifecycle_metrics(db, days: int = 90, now: dt.datetime | None = None) -> dict:
     now = now or utcnow()
     start = now - dt.timedelta(days=days)
@@ -344,6 +348,7 @@ def _next_bucket(ts: dt.datetime, granularity: str) -> dt.datetime:
     return ts + GRANULARITIES[granularity]
 
 
+@cached("lifecycle_trends")
 def lifecycle_trends(db, days: int = 365, granularity: str = "week",
                      now: dt.datetime | None = None) -> dict:
     """Time series of findings opened, closed, and backlog over `days`,
@@ -644,6 +649,11 @@ def import_historical(db, rows: list[dict], actor: str) -> dict:
             detail={"created": created, "skipped": skipped, "errors": errors},
         ))
     db.commit()
+    if created:
+        from .cache import invalidate_all
+        invalidate_all()
+        from .rollup import mark_stale
+        mark_stale(db)
     return {
         "ok": errors == 0,
         "processed": len(rows),

@@ -164,6 +164,8 @@ class DashboardOut(BaseModel):
     by_severity: dict[str, int] = Field(default_factory=dict)
     by_source: dict[str, int] = Field(default_factory=dict)
     by_disposition: dict[str, int] = Field(default_factory=dict)
+    by_bucket: dict[str, int] = Field(default_factory=dict)
+    bucket_aging_breach: dict[str, int] = Field(default_factory=dict)
     overdue: int = 0
     kev_open: int = 0
     undecided: int = 0
@@ -199,6 +201,15 @@ class DispositionMeta(BaseModel):
     value: str
     label: str
     is_risk_decision: bool
+    bucket: int
+
+
+class BucketMeta(BaseModel):
+    number: int
+    title: str
+    summary: str
+    max_days: int | None = None
+    dispositions: list[str] = Field(default_factory=list)
 
 
 class ScopeMeta(BaseModel):
@@ -219,6 +230,7 @@ class MetaOut(BaseModel):
     approvers: list[str]
     current_user: str
     dispositions: list[DispositionMeta]
+    buckets: list[BucketMeta] = Field(default_factory=list)
     severities: list[str]
     categories: list[str]
     scopes: list[ScopeMeta]

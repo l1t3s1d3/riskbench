@@ -8,7 +8,7 @@ const state = {
   pageSize: 50,
   filter: {
     status: ['open'], source: [], severity: [], category: [], disposition: [],
-    quick: null, q: '', sort: 'risk',
+    bucket: [], quick: null, q: '', sort: 'risk',
     // Exact-match drill-downs (set by clicking a group row).
     asset_id: null, component: '', component_version: '',
     owner: '', business_unit: '', asset_type: '', asset_group_id: null, ecosystem: '',
@@ -60,7 +60,8 @@ function toast(message, isError) {
 
 const DISP_SHORT = {
   fix_immediately: 'Fix now', complex_resolution: 'Complex', developer_review: 'Dev review',
-  accept_risk: 'Accepted', adjust_risk: 'Adjusted', false_positive: 'Not affected',
+  routine_fix: 'Routine', accept_risk: 'Accepted', adjust_risk: 'Adjusted',
+  false_positive: 'Not affected',
 };
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const STATUS_ORDER = ['open', 'fixed', 'stale', 'verified_fixed', 'suppressed_at_source'];
@@ -178,6 +179,7 @@ async function boot() {
   $('regBulkClear').onclick = () => { state.register.selected.clear(); loadRegister(); };
 
   await loadFindings();
+  startSyncWatcher();
 }
 
 function debounce(fn, ms) {
@@ -189,6 +191,7 @@ function switchView(view) {
   state.view = view;
   [...$('tabs').children].forEach((t) => t.classList.toggle('is-active', t.dataset.view === view));
   ['findings', 'register', 'activity', 'compliance', 'exceptions', 'rules', 'sources', 'tickets', 'settings'].forEach((v) => { $(`view-${v}`).hidden = v !== view; });
+  if (view === 'findings') clearFindingsBadge();
   if (view === 'register') loadRegister();
   if (view === 'activity') loadActivity();
   if (view === 'compliance') loadCompliance();
@@ -197,6 +200,113 @@ function switchView(view) {
   if (view === 'sources') loadSources();
   if (view === 'tickets') loadTickets();
   if (view === 'settings') loadSettings();
+}
+
+// --- Background sync watcher ------------------------------------------------
+// Poll /api/sync/runs so the user knows a sync is happening (or just finished)
+// without being on the Sources tab. Shows:
+//   - pulsing dot on "Sources" while any run is in-flight
+//   - "N new" badge on "Findings" when a sync completes with new findings
+// Click Findings to clear the badge.
+
+const SYNC_POLL_FOCUSED_MS = 5_000;
+const SYNC_POLL_HIDDEN_MS  = 30_000;
+const LAST_SEEN_KEY = 'riskdesk:lastSeenRunId';
+
+let _newSinceLastVisit = 0;
+let _syncPollTimer = null;
+let _lastSeenRunId = null;
+
+function loadLastSeenRunId() {
+  try {
+    const v = localStorage.getItem(LAST_SEEN_KEY);
+    return v ? Number(v) : null;
+  } catch (_) { return null; }
+}
+function saveLastSeenRunId(id) {
+  try { localStorage.setItem(LAST_SEEN_KEY, String(id)); } catch (_) {}
+}
+
+function setTabBadge(tabKey, html) {
+  const tab = document.querySelector(`.tab[data-view="${tabKey}"]`);
+  if (!tab) return;
+  const existing = tab.querySelector('.tab-dot, .tab-badge');
+  if (existing) existing.remove();
+  if (html) tab.insertAdjacentHTML('beforeend', html);
+}
+
+function clearFindingsBadge() {
+  _newSinceLastVisit = 0;
+  setTabBadge('findings', '');
+}
+
+async function pollSyncRuns() {
+  try {
+    const runs = await api('/api/sync/runs?limit=10');
+    // Any run currently in-flight -> pulsing dot on Sources
+    const running = runs.some((r) => !r.finished_at || r.status === 'running');
+    setTabBadge('sources', running ? '<span class="tab-dot is-running" title="Sync in progress"></span>' : '');
+
+    if (_lastSeenRunId === null) {
+      // First poll of this session -- seed from localStorage or the current max,
+      // so we don't fire notifications for history on first load.
+      const saved = loadLastSeenRunId();
+      _lastSeenRunId = saved !== null ? saved : (runs[0] ? runs[0].id : 0);
+    }
+
+    // Any completed run newer than what we've seen -> toast + findings badge
+    const fresh = runs.filter(
+      (r) => r.id > _lastSeenRunId && r.finished_at && r.status === 'ok'
+    );
+    if (fresh.length) {
+      const newFindings = fresh.reduce((s, r) => s + (r.new || 0), 0);
+      if (newFindings > 0 && state.view !== 'findings') {
+        _newSinceLastVisit += newFindings;
+        setTabBadge('findings',
+          `<span class="tab-badge" title="${_newSinceLastVisit} new findings since you last viewed the list">${_newSinceLastVisit}</span>`);
+      }
+      // Toast per finished source (dedup if multiple)
+      const bySource = {};
+      fresh.forEach((r) => {
+        bySource[r.source] = (bySource[r.source] || { new: 0, findings: 0, closed: 0 });
+        bySource[r.source].new += r.new || 0;
+        bySource[r.source].findings += r.findings || 0;
+        bySource[r.source].closed += r.closed || 0;
+      });
+      for (const [src, s] of Object.entries(bySource)) {
+        toast(`${src} sync done: ${s.new} new, ${s.closed} closed, ${s.findings} total`);
+      }
+      // Refresh the view the user is currently on if it depends on findings data
+      if (state.view === 'findings') loadFindings();
+      if (state.view === 'sources') loadSources();
+    }
+
+    // Advance the pointer to the newest completed run we saw
+    const maxCompletedId = runs
+      .filter((r) => r.finished_at)
+      .reduce((m, r) => Math.max(m, r.id), _lastSeenRunId);
+    if (maxCompletedId > _lastSeenRunId) {
+      _lastSeenRunId = maxCompletedId;
+      saveLastSeenRunId(maxCompletedId);
+    }
+  } catch (_) {
+    // Network blips are fine -- try again next tick.
+  } finally {
+    scheduleSyncPoll();
+  }
+}
+
+function scheduleSyncPoll() {
+  if (_syncPollTimer) clearTimeout(_syncPollTimer);
+  const delay = document.hidden ? SYNC_POLL_HIDDEN_MS : SYNC_POLL_FOCUSED_MS;
+  _syncPollTimer = setTimeout(pollSyncRuns, delay);
+}
+
+function startSyncWatcher() {
+  pollSyncRuns();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) pollSyncRuns();
+  });
 }
 
 function refresh() {
@@ -215,6 +325,7 @@ function filterParams() {
   state.filter.severity.forEach((v) => p.append('severity', v));
   state.filter.category.forEach((v) => p.append('category', v));
   state.filter.disposition.forEach((v) => p.append('disposition', v));
+  (state.filter.bucket || []).forEach((v) => p.append('bucket', String(v)));
   if (state.filter.q) p.set('q', state.filter.q);
   if (state.filter.sort) p.set('sort', state.filter.sort);
   // Exact-match drill-down filters from a clicked group row.
@@ -272,10 +383,31 @@ function renderStats(d) {
     ['Awaiting approval', d.pending_approvals.toLocaleString(), '', null],
     ['Lapsing in 30d', d.expiring_30d.toLocaleString(), 'is-notice', null],
   ];
-  $('statStrip').innerHTML = items.map(([label, val, cls, quick]) =>
+  const stats = items.map(([label, val, cls, quick]) =>
     `<div class="stat ${cls} ${quick ? 'is-clickable' : ''}" ${quick ? `data-quick="${quick}"` : ''}>
        <b>${val}</b><span>${label}</span></div>`).join('');
+  const bucketMeta = state.meta?.buckets || [];
+  const breach = d.bucket_aging_breach || {};
+  const buckets = (d.by_bucket)
+    ? bucketMeta.map((b) => {
+        const n = (d.by_bucket[String(b.number)] || 0);
+        const over = breach[String(b.number)] || 0;
+        const notice = over > 0 ? 'is-notice' : '';
+        const tag = over > 0 ? ` <span class="bucket-breach" title="${over} over ${b.max_days}-day cap">${over}!</span>` : '';
+        return `<div class="stat bucket-stat is-clickable ${notice}" data-bucket="${b.number}" title="${esc(b.summary)}">
+          <b>${n.toLocaleString()}${tag}</b><span>B${b.number} · ${esc(b.title)}</span></div>`;
+      }).join('')
+    : '';
+  $('statStrip').innerHTML = stats + buckets;
   $('statStrip').onclick = (e) => {
+    const b = e.target.closest('[data-bucket]');
+    if (b) {
+      state.filter.bucket = [parseInt(b.dataset.bucket, 10)];
+      state.page = 1;
+      state.selected.clear();
+      loadFindings();
+      return;
+    }
     const s = e.target.closest('[data-quick]');
     if (s) applyQuick(s.dataset.quick);
   };
@@ -283,7 +415,7 @@ function renderStats(d) {
 
 function applyQuick(kind) {
   if (kind === 'clear') {
-    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], quick: null, q: '', sort: state.filter.sort };
+    state.filter = { status: ['open'], source: [], severity: [], category: [], disposition: [], bucket: [], quick: null, q: '', sort: state.filter.sort };
     $('qInput').value = '';
   } else {
     state.filter.quick = state.filter.quick === kind ? null : kind;
@@ -367,11 +499,14 @@ function renderFindings() {
     $('selectAllText').innerHTML = state.allMatchingIds
       ? `All <b>${r.total.toLocaleString()}</b> matching findings are selected.`
       : `<b>${state.selected.size}</b> selected on this page.`;
-    $('selectAllMatching').hidden = !!state.allMatchingIds || r.total <= state.selected.size;
+    $('selectAllMatching').hidden = !!state.allMatchingIds || r.total <= state.results.total;
     bar.insertAdjacentElement('beforeend', decideButton());
     bar.insertAdjacentElement('beforeend', ticketButton());
+    renderScopePromotion();
   } else {
     bar.hidden = true;
+    const hint = document.getElementById('scopePromotionHint');
+    if (hint) hint.remove();
   }
 
   if (!r.findings.length) {
@@ -408,6 +543,98 @@ function decideButton() {
   b.textContent = `Record a decision on ${(state.allMatchingIds ? state.results.total : state.selected.size).toLocaleString()} findings`;
   b.onclick = () => openDecide([...(state.allMatchingIds || state.selected)]);
   return b;
+}
+
+async function renderScopePromotion() {
+  const ids = [...(state.allMatchingIds || state.selected)];
+  if (ids.length < 2) {
+    const h = document.getElementById('scopePromotionHint');
+    if (h) h.remove();
+    return;
+  }
+  // Mount a hint block just under the select-all bar so it reads as a tip,
+  // not a separate action. Keep it quiet when nothing useful is found.
+  const bar = $('selectAllBar');
+  let host = document.getElementById('scopePromotionHint');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'scopePromotionHint';
+    host.className = 'scope-hint';
+    bar.insertAdjacentElement('afterend', host);
+  }
+  host.innerHTML = '<span class="hint">Checking for broader scope…</span>';
+
+  let data;
+  try {
+    data = await api('/api/review/scope-promotion', {
+      method: 'POST', body: JSON.stringify({ finding_ids: ids.slice(0, 5000) }),
+    });
+  } catch (e) {
+    host.remove();
+    return;
+  }
+
+  const best = (data.suggestions || []).find(
+    (s) => s.scope_type !== 'finding' && s.key_count < ids.length
+  );
+  if (!best) {
+    host.remove();
+    return;
+  }
+  const warn = best.warnings.length ? ` <span class="scope-warn" title="${esc(best.warnings.join('\n'))}">${best.warnings.length} warning${best.warnings.length > 1 ? 's' : ''}</span>` : '';
+  const extras = best.extra_beyond_selection
+    ? ` <span class="hint">(+${best.extra_beyond_selection.toLocaleString()} other open findings covered)</span>` : '';
+  host.innerHTML = `
+    <span class="scope-hint-icon">↗</span>
+    <span>${esc(best.summary)}${warn}${extras}</span>
+    <button class="btn-ghost" id="scopePromoteApply" style="margin-left:auto">Use this scope</button>
+    <button class="btn-ghost" id="scopePromoteShow" style="margin-left:6px">Show options</button>
+  `;
+  document.getElementById('scopePromoteApply').onclick = () => {
+    openDecideWithScope(ids, best.scope_type);
+  };
+  document.getElementById('scopePromoteShow').onclick = () => {
+    showScopePromotionOptions(ids, data.suggestions);
+  };
+}
+
+function openDecideWithScope(ids, scopeType) {
+  // openDecide's `suggested` arg seeds the draft; we route the promoted
+  // scope through there rather than mutating state ourselves.
+  openDecide(ids, { scope: scopeType });
+}
+
+function showScopePromotionOptions(ids, suggestions) {
+  const host = document.getElementById('scopePromotionHint');
+  if (!host) return;
+  // Toggle an expanded options panel inline rather than open a modal.
+  let panel = document.getElementById('scopePromotionPanel');
+  if (panel) { panel.remove(); return; }
+  panel = document.createElement('div');
+  panel.id = 'scopePromotionPanel';
+  panel.className = 'scope-panel';
+  panel.innerHTML = suggestions.map((s) => {
+    const warns = s.warnings.length
+      ? `<ul class="scope-warn-list">${s.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>`
+      : '';
+    const badge = s.clean ? '<span class="tag tag-ok">clean</span>' : '<span class="tag tag-warn">has extras</span>';
+    const extras = s.extra_beyond_selection
+      ? ` <span class="hint">+${s.extra_beyond_selection.toLocaleString()} beyond selection</span>` : '';
+    return `<div class="scope-option">
+      <div class="scope-option-head">
+        <b>${esc(s.summary)}</b> ${badge}${extras}
+      </div>
+      ${warns}
+      <button class="btn btn-seal" data-scope-apply="${s.scope_type}">Use ${esc(s.scope_type)} scope</button>
+    </div>`;
+  }).join('');
+  host.insertAdjacentElement('afterend', panel);
+  panel.querySelectorAll('[data-scope-apply]').forEach((b) => {
+    b.onclick = () => {
+      panel.remove();
+      openDecideWithScope(ids, b.dataset.scopeApply);
+    };
+  });
 }
 
 function ticketButton() {
@@ -629,13 +856,29 @@ function renderActiveDrillDowns() {
       </span>`);
     }
   }
+  if ((state.filter.bucket || []).length) {
+    for (const n of state.filter.bucket) {
+      const meta = (state.meta?.buckets || []).find((b) => b.number === n);
+      const title = meta ? meta.title : `Bucket ${n}`;
+      chips.push(`<span class="tag" style="font-size:11px" data-drill="bucket">
+        bucket: ${n} · ${esc(title)} <a href="#" class="link" style="margin-left:4px" data-clear="bucket">×</a>
+      </span>`);
+    }
+  }
   if (!chips.length) { host.innerHTML = ''; return; }
   host.innerHTML = '<span class="hint" style="font-size:11px">Drilled down:</span>' +
     chips.join('') +
     `<a href="#" class="link" style="font-size:11px" id="clearAllDrills">clear all</a>`;
   host.onclick = (e) => {
     const c = e.target.closest('[data-clear]');
-    if (c) { e.preventDefault(); state.filter[c.dataset.clear] = (c.dataset.clear.endsWith('_id') ? null : ''); state.page = 1; loadFindings(); return; }
+    if (c) {
+      e.preventDefault();
+      const k = c.dataset.clear;
+      state.filter[k] = (k === 'bucket') ? [] : (k.endsWith('_id') ? null : '');
+      state.page = 1;
+      loadFindings();
+      return;
+    }
     if (e.target.id === 'clearAllDrills') {
       e.preventDefault();
       DRILLDOWN_KEYS.forEach((k) => { state.filter[k] = (k.endsWith('_id') ? null : ''); });
@@ -1649,14 +1892,26 @@ const SOURCE_INFO = {
 async function loadSources() {
   const meta = await api('/api/meta');
   state.meta = meta;
+  const runs = await api('/api/sync/runs?limit=40');
+  // Most recent run per source, for the "last sync" line on each card.
+  const latest = {};
+  for (const r of runs) {
+    if (!latest[r.source]) latest[r.source] = r;
+  }
+
   $('sourceCards').innerHTML = Object.entries(SOURCE_INFO).map(([key, [name, blurb]]) => {
     const on = meta.connectors[key];
+    const last = latest[key];
     return `<div class="source-card" data-source="${key}">
       <h4><span class="dot ${on ? 'on' : ''}"></span>${esc(name)}</h4>
       <div class="hint" style="margin:0 0 8px">${esc(blurb)}</div>
       <div class="status" id="status-${key}">${on
         ? 'Credentials are configured. Test the connection before the first sync.'
         : 'Not configured. Add its credentials to .env, or load demo data to try the interface.'}</div>
+      <div class="sync-progress" id="progress-${key}"><div class="sync-progress-bar"></div></div>
+      <div class="last-sync ${last && last.status !== 'ok' ? 'is-bad' : ''}" id="last-${key}">
+        ${lastSyncLabel(last)}
+      </div>
       <div class="actions">
         <button class="btn-ghost" onclick="testSource('${key}')">Test connection</button>
         <button class="btn-ghost" onclick="syncSource('${key}', false)"${on ? '' : ' disabled'}>Sync now</button>
@@ -1665,7 +1920,6 @@ async function loadSources() {
     </div>`;
   }).join('');
 
-  const runs = await api('/api/sync/runs?limit=40');
   $('syncList').innerHTML = runs.length ? runs.map((r) => `
     <div class="row" style="grid-template-columns:30px 1fr 220px 150px 120px;cursor:default">
       <div class="edge ${r.status === 'ok' ? 'sev-low' : 'sev-critical'}"></div>
@@ -1693,9 +1947,51 @@ async function testSource(key) {
   }
 }
 
+function lastSyncLabel(r) {
+  if (!r) return 'Last sync: never';
+  const ts = new Date(r.started_at);
+  const abs = ts.toLocaleString();
+  const rel = relativeTime(ts);
+  const status = r.status === 'ok' ? 'ok' : r.status;
+  const bits = [`${r.findings.toLocaleString()} findings`];
+  if (r.new) bits.push(`${r.new} new`);
+  if (r.closed) bits.push(`${r.closed} closed`);
+  return `Last sync: ${rel} (${abs}) \u00b7 ${status} \u00b7 ${bits.join(' / ')}`;
+}
+
+function relativeTime(date) {
+  const diff = (Date.now() - date.getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.round(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.round(diff / 3600)}h ago`;
+  return `${Math.round(diff / 86400)}d ago`;
+}
+
 async function syncSource(key, demo) {
   const el = $(`status-${key}`);
+  const bar = $(`progress-${key}`);
+  const last = $(`last-${key}`);
   el.textContent = demo ? 'Generating demo data\u2026' : 'Syncing\u2026 this can take a few minutes on the first run.';
+  if (bar) bar.classList.add('on');
+  // Kick the background watcher immediately so the Sources-tab "running" dot
+  // and the Findings-tab "new" badge reflect this sync as soon as the request
+  // starts, not at the next 5-second tick.
+  if (typeof pollSyncRuns === 'function') setTimeout(pollSyncRuns, 50);
+
+  // Stream progress via SSE while the POST runs in parallel. Close the
+  // stream on completion or on sync failure.
+  let evt = null;
+  try {
+    evt = new EventSource(`/api/sync/progress/${key}`);
+    evt.addEventListener('progress', (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        el.textContent = `Syncing\u2026 ${d.findings.toLocaleString()} findings (${d.new} new) across ${d.assets} assets so far.`;
+      } catch (_) {}
+    });
+    evt.addEventListener('complete', () => { if (evt) { evt.close(); evt = null; } });
+  } catch (_) { /* SSE unsupported; ignore */ }
+
   try {
     const r = await api(`/api/sync/${key}?demo=${demo}`, { method: 'POST' });
     if (r.status === 'ok') {
@@ -1706,10 +2002,25 @@ async function syncSource(key, demo) {
       el.textContent = r.error;
       el.style.color = 'var(--seal)';
     }
-    loadSources();
   } catch (e) {
     el.textContent = e.message;
     el.style.color = 'var(--seal)';
+  } finally {
+    if (bar) bar.classList.remove('on');
+    if (evt) evt.close();
+    // Refresh the last-sync line and schedule card.
+    try {
+      const runs = await api('/api/sync/runs?limit=5');
+      const r = runs.find((x) => x.source === key);
+      if (last) {
+        last.textContent = lastSyncLabel(r);
+        last.classList.toggle('is-bad', r && r.status !== 'ok');
+      }
+    } catch (_) {}
+    loadSources();
+    // One more poll so the global watcher's running-dot clears and the
+    // findings-tab badge appears without waiting another 5 seconds.
+    if (typeof pollSyncRuns === 'function') setTimeout(pollSyncRuns, 50);
   }
 }
 
@@ -2567,7 +2878,7 @@ function applySavedView(v) {
   state.filter = {
     status: f.status || f.statuses || ['open'],
     source: f.sources || [], severity: f.severities || [], category: f.categories || [],
-    disposition: f.dispositions || [], quick: f.quick || null,
+    disposition: f.dispositions || [], bucket: f.buckets || [], quick: f.quick || null,
     q: f.q || '', sort: f.sort || 'risk',
   };
   $('qInput').value = state.filter.q;

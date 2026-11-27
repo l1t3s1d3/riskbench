@@ -20,6 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 
+from .compression import CompressedJSON
 from .db import Base
 
 
@@ -63,6 +64,10 @@ class Asset(Base):
     __table_args__ = (
         UniqueConstraint("source", "source_asset_id", name="uq_asset_source"),
         Index("ix_asset_name", "name"),
+        # Drill-down filters from the Grouped Findings view (group by owner /
+        # asset type). Business_unit already has a per-column index.
+        Index("ix_asset_owner", "owner"),
+        Index("ix_asset_type", "asset_type"),
     )
 
 
@@ -151,7 +156,8 @@ class Finding(Base):
     verified_at = Column(DateTime, nullable=True)
 
     source_url = Column(String(1024))
-    raw = Column(JSON, default=dict)        # untouched source payload
+    raw = Column(CompressedJSON, default=dict)   # untouched source payload (auto-gzipped above 512 B)
+    is_demo = Column(Boolean, default=False, nullable=False, index=True)
 
     asset = relationship("Asset", back_populates="findings")
     vuln = relationship("Vuln", back_populates="findings")
@@ -159,6 +165,14 @@ class Finding(Base):
     __table_args__ = (
         UniqueConstraint("source", "source_finding_id", name="uq_finding_source"),
         Index("ix_finding_triage", "status", "severity", "source"),
+        # Hot-path indexes for the Grouped view, remediation reporting, and
+        # SLA queries. Each one targets a query pattern that currently does a
+        # full table scan: group-by-component, remediated-since-date, and
+        # age-based scoring.
+        Index("ix_finding_component", "component"),
+        Index("ix_finding_closed_at", "closed_at"),
+        Index("ix_finding_asset_status", "asset_id", "status"),
+        Index("ix_finding_status_first_detected", "status", "first_detected"),
     )
 
 
@@ -194,7 +208,7 @@ class Adjudication(Base):
     scope_label = Column(String(512))       # human-readable, for the register
     # Snapshot of the filter used when this was created in bulk, so the basis of
     # the decision is reconstructable later.
-    scope_filter = Column(JSON, nullable=True)
+    scope_filter = Column(CompressedJSON, nullable=True)
 
     disposition = Column(String(32), nullable=False, index=True)
     state = Column(String(32), nullable=False, default="draft", index=True)
@@ -273,7 +287,7 @@ class AuditEvent(Base):
     entity_type = Column(String(32), index=True)
     entity_id = Column(String(64), index=True)
     summary = Column(String(1024))
-    detail = Column(JSON, default=dict)
+    detail = Column(CompressedJSON, default=dict)
 
 
 class SyncRun(Base):
@@ -290,7 +304,22 @@ class SyncRun(Base):
     error = Column(Text)
     triggered_by = Column(String(256))
     # Delta summary written by the sync engine for the review surface.
-    delta = Column(JSON, default=dict)
+    delta = Column(CompressedJSON, default=dict)
+
+
+class DashboardRollup(Base):
+    """Singleton row holding the materialized dashboard payload.
+
+    The dashboard computation walks every open finding and resolves
+    adjudication per-row to derive effective severity. At scale that loop
+    dominates. We cache the result in a single row and mark it stale on
+    any mutation that would change the numbers; the next read rebuilds.
+    """
+    __tablename__ = "dashboard_rollup"
+    id = Column(Integer, primary_key=True)
+    generated_at = Column(DateTime, nullable=True)
+    stale = Column(Boolean, default=True, nullable=False)
+    data = Column(JSON, default=dict)
 
 
 class SyncSchedule(Base):

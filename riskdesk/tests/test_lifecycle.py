@@ -849,6 +849,30 @@ def test_suppressed_at_source_from_connector(sync, db):
     assert f.closed_at is not None
 
 
+def test_add_missing_indexes_creates_declared_indexes(tmp_path):
+    """add_missing_indexes picks up any Index declared on a model that is
+    not present in the live DB -- so an index added in a later release
+    lands automatically on next startup."""
+    from app.db import Base, add_missing_indexes
+    from sqlalchemy import create_engine, inspect, text
+    eng = create_engine(f"sqlite:///{tmp_path / 'live.db'}")
+    Base.metadata.create_all(eng)
+    # Drop one of the indexes we declared to simulate an older schema
+    with eng.begin() as c:
+        c.execute(text("DROP INDEX IF EXISTS ix_finding_component"))
+        c.execute(text("DROP INDEX IF EXISTS ix_finding_closed_at"))
+    before = {i["name"] for i in inspect(eng).get_indexes("findings")}
+    assert "ix_finding_component" not in before
+    added = add_missing_indexes(eng)
+    assert "ix_finding_component" in added
+    assert "ix_finding_closed_at" in added
+    after = {i["name"] for i in inspect(eng).get_indexes("findings")}
+    assert "ix_finding_component" in after
+    assert "ix_finding_closed_at" in after
+    # Second run is a no-op
+    assert add_missing_indexes(eng) == []
+
+
 def test_add_missing_columns_upgrades_existing_table(tmp_path):
     from app.db import add_missing_columns
     eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")

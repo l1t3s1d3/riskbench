@@ -22,6 +22,12 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from .config import settings
+from .cache import invalidate_all as invalidate_cache
+
+
+def _mark_rollup_stale(db):
+    from .rollup import mark_stale
+    mark_stale(db)
 from .enums import (
     RISK_DECISION_DISPOSITIONS, Disposition, AdjudicationState, ScopeType,
 )
@@ -210,7 +216,16 @@ def create_decisions(
         ))
         created.append(adj)
 
+    # Human decisions supersede any auto routine-fix tags on the same findings.
+    # Retire by scope so a vuln-scope decision clears routine tags on every
+    # finding that scope covers, not only the ones explicitly selected.
+    from .routine_fix import retire_for_scope
+    for adj in created:
+        retire_for_scope(db, adj.scope_type, adj.scope_key, actor=actor)
+
     db.commit()
+    invalidate_cache()
+    _mark_rollup_stale(db)
     return created
 
 
@@ -251,6 +266,8 @@ def decide(db, adjudication_id: int, approve: bool, actor: str,
                 detail={"renewal_id": adj.id},
             ))
     db.commit()
+    invalidate_cache()
+    _mark_rollup_stale(db)
     return adj
 
 
@@ -272,6 +289,8 @@ def revoke(db, adjudication_id: int, actor: str, reason: str) -> Adjudication:
         detail={"reason": reason},
     ))
     db.commit()
+    invalidate_cache()
+    _mark_rollup_stale(db)
     return adj
 
 
@@ -323,6 +342,8 @@ def renew(db, adjudication_id: int, actor: str, justification: str,
         detail={"previous_id": old.id, "expires_at": expires_at.isoformat()},
     ))
     db.commit()
+    invalidate_cache()
+    _mark_rollup_stale(db)
     return new
 
 
@@ -350,6 +371,8 @@ def expire_lapsed(db, actor: str = "system") -> int:
         ))
     if rows:
         db.commit()
+        invalidate_cache()
+        _mark_rollup_stale(db)
     return len(rows)
 
 
